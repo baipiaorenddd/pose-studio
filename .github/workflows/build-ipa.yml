@@ -1,0 +1,63 @@
+name: Build unsigned IPA
+
+# 在 GitHub 的 macOS 云端机器上编译，产出未签名 .ipa
+# 下载后由 Sideloadly / AltStore 用个人 Apple ID 签名安装到 iPhone
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 显示 Xcode 版本
+        run: |
+          xcodebuild -version
+          xcode-select -p
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate --spec project.yml
+
+      - name: 编译
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PoseStudio.xcodeproj \
+            -scheme PoseStudio \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            build 2>&1 | tail -80
+
+      - name: 打包 IPA
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "找到: $APP"
+          test -n "$APP"
+          rm -rf Payload PoseStudio.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry PoseStudio.ipa Payload
+          ls -lh PoseStudio.ipa
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PoseStudio-unsigned-ipa
+          path: PoseStudio.ipa
+          retention-days: 30
