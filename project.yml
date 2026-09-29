@@ -1,0 +1,55 @@
+name: PoseStudio
+options:
+  bundleIdPrefix: com.posestudio
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+
+targets:
+  PoseStudio:
+    type: application
+    platform: iOS
+    sources:
+      - path: PoseStudio
+    scheme:
+      testTargets: []
+      gatherCoverageData: false
+    info:
+      path: PoseStudio/Info.plist
+      properties:
+        CFBundleDisplayName: Pose Studio
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        NSCameraUsageDescription: 需要使用摄像头实时识别人体姿态，所有处理都在本机完成。
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.posestudio.app
+        PRODUCT_NAME: PoseStudio
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        ENABLE_BITCODE: NO
+        # 侧载需要未签名产物，交给 Sideloadly / AltStore 用个人 Apple ID 重新签名
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGN_ENTITLEMENTS: ""
+        DEVELOPMENT_TEAM: ""
+        ONLY_ACTIVE_ARCH: NO
