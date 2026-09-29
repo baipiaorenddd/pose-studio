@@ -66,13 +66,15 @@ struct OverlayCanvas: View {
 
         for (index, pose) in poses.enumerated() {
             let base = Self.palette[index % Self.palette.count]
+            // 火柴人模式下也一并隐藏面部关键点，让头部只剩一个圆圈
+            let hideFace = settings.stickHead || !settings.showFacePoints
 
             // ---------- 骨架连线 ----------
             if settings.showSkeleton {
                 for (a, b, group) in PoseEstimator.connections {
                     guard let ja = pose.points[a], let jb = pose.points[b] else { continue }
                     if settings.hideLowConfidence && (ja.confidence < kconf || jb.confidence < kconf) { continue }
-                    if !settings.showFacePoints &&
+                    if hideFace &&
                         (PoseEstimator.faceJointIndices.contains(a) || PoseEstimator.faceJointIndices.contains(b)) { continue }
 
                     var path = Path()
@@ -87,12 +89,44 @@ struct OverlayCanvas: View {
                 }
             }
 
+            // ---------- 火柴人头部（圆圈）----------
+            if settings.stickHead, let head = headCircle(pose, screen: screen, minConf: kconf) {
+                let headColor = settings.groupColors ? groupColor("head") : base
+                // 半径做个体检，防止关键点异常时画出一个巨大的圆
+                let hr = min(max(head.radius, 6), min(size.width, size.height) * 0.25)
+
+                // 脖子 -> 圆圈下缘的连线，填上隐藏面部关键点后留下的缺口
+                if let neckJoint = pose.points[5], neckJoint.confidence >= kconf {
+                    let neckPt = screen(neckJoint.position)
+                    let dx = neckPt.x - head.center.x
+                    let dy = neckPt.y - head.center.y
+                    let dist = max(hypot(dx, dy), 0.001)
+                    if dist > hr {
+                        let edge = CGPoint(x: head.center.x + dx / dist * hr,
+                                           y: head.center.y + dy / dist * hr)
+                        var neckPath = Path()
+                        neckPath.move(to: neckPt)
+                        neckPath.addLine(to: edge)
+                        ctx.stroke(neckPath, with: .color(headColor),
+                                   style: StrokeStyle(lineWidth: lw, lineCap: .round))
+                    }
+                }
+
+                let circleRect = CGRect(x: head.center.x - hr,
+                                        y: head.center.y - hr,
+                                        width: hr * 2,
+                                        height: hr * 2)
+                let circlePath = Path(ellipseIn: circleRect)
+                ctx.fill(circlePath, with: .color(headColor.opacity(0.18)))
+                ctx.stroke(circlePath, with: .color(headColor), lineWidth: lw)
+            }
+
             // ---------- 关节圆点 ----------
             if settings.showKeypoints {
                 for (i, maybe) in pose.points.enumerated() {
                     guard let j = maybe else { continue }
                     if settings.hideLowConfidence && j.confidence < kconf { continue }
-                    if !settings.showFacePoints && PoseEstimator.faceJointIndices.contains(i) { continue }
+                    if hideFace && PoseEstimator.faceJointIndices.contains(i) { continue }
 
                     let p = screen(j.position)
                     let outer = Path(ellipseIn: CGRect(x: p.x - radius - 1.5, y: p.y - radius - 1.5,
@@ -109,7 +143,7 @@ struct OverlayCanvas: View {
                 for (i, maybe) in pose.points.enumerated() {
                     guard let j = maybe else { continue }
                     if settings.hideLowConfidence && j.confidence < kconf { continue }
-                    if !settings.showFacePoints && PoseEstimator.faceJointIndices.contains(i) { continue }
+                    if hideFace && PoseEstimator.faceJointIndices.contains(i) { continue }
                     let p = screen(j.position)
                     let label = Text(j.name)
                         .font(.system(size: 11, weight: .semibold))
@@ -186,6 +220,43 @@ struct OverlayCanvas: View {
                           width: size.width + 14, height: size.height + 7)
         ctx.fill(Path(roundedRect: rect, cornerRadius: 5), with: .color(color))
         ctx.draw(resolved, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
+    }
+
+    /// 由面部关键点推算一个能罩住头部的圆（火柴人头部）。
+    /// 优先用双耳距离（约等于头宽），其次双眼，最后用鼻-颈距离。
+    private func headCircle(_ pose: Pose,
+                            screen: (CGPoint) -> CGPoint,
+                            minConf: Float) -> (center: CGPoint, radius: CGFloat)? {
+        func pt(_ i: Int) -> CGPoint? {
+            guard let j = pose.points[i], j.confidence >= minConf else { return nil }
+            return screen(j.position)
+        }
+
+        let nose = pt(0)
+        let lEye = pt(1), rEye = pt(2)
+        let lEar = pt(3), rEar = pt(4)
+        let neck = pt(5)
+
+        var center: CGPoint?
+        var radius: CGFloat = 0
+
+        if let a = lEar, let b = rEar {
+            center = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+            radius = hypot(b.x - a.x, b.y - a.y) * 0.60
+        } else if let a = lEye, let b = rEye {
+            center = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+            radius = hypot(b.x - a.x, b.y - a.y) * 1.10
+        } else if let n = nose, let k = neck {
+            let d = hypot(n.x - k.x, n.y - k.y)
+            center = CGPoint(x: n.x, y: n.y - d * 0.18)
+            radius = d * 0.62
+        } else if let n = nose {
+            center = n
+            radius = 28
+        }
+
+        guard let c = center else { return nil }
+        return (c, max(radius, 8))
     }
 
     private func groupColor(_ group: String) -> Color {

@@ -200,6 +200,7 @@ struct ContentView: View {
                 }
 
                 group("样式") {
+                    toggleRow("火柴人头部（圆圈）", $settings.stickHead)
                     toggleRow("分区配色", $settings.groupColors)
                     toggleRow("四角括号框", $settings.cornerBox)
                     toggleRow("压暗背景突出骨架", $settings.dimBackground)

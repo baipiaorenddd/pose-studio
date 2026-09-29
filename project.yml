@@ -19,8 +19,8 @@ targets:
       path: PoseStudio/Info.plist
       properties:
         CFBundleDisplayName: Pose Studio
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.2"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UIRequiredDeviceCapabilities:
           - arm64
@@ -40,8 +40,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.posestudio.app
         PRODUCT_NAME: PoseStudio
-        MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "1.2"
+        CURRENT_PROJECT_VERSION: "3"
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.0"
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"

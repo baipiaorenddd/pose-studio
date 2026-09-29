@@ -33,6 +33,8 @@ final class Settings: ObservableObject {
     @Published var cornerBox: Bool = true         // 四角括号框
     @Published var dimBackground: Bool = false    // 压暗背景突出骨架
     @Published var hideLowConfidence: Bool = true // 隐藏低置信度关节
+    /// 火柴人模式：头部画成一个圆圈，并隐藏眼/耳/鼻等面部关键点
+    @Published var stickHead: Bool = false
 
     // ---- 参数 ----
     @Published var detectionConfidence: Double = 0.30
