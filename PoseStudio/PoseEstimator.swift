@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Vision
+import ImageIO
 import Combine
 import CoreGraphics
 
@@ -197,10 +198,27 @@ final class PoseEstimator: NSObject, ObservableObject {
     // MARK: 每帧推理
 
     fileprivate func handle(pixelBuffer: CVPixelBuffer) {
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bufferW = CVPixelBufferGetWidth(pixelBuffer)
+        let bufferH = CVPixelBufferGetHeight(pixelBuffer)
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        // ---- 方向对齐（这是"骨骼横着"那个 bug 的修复点）----
+        //
+        // 画面目标是竖屏正立。AVCaptureConnection.videoRotationAngle 会把缓冲区
+        // 物理旋转，但它在会话真正跑起来之前设置经常不生效——那样 Vision 拿到的
+        // 就是横屏缓冲区，坐标空间和预览画面差了 90°，骨架自然就是横的。
+        //
+        // 这里不再依赖它：直接看缓冲区的真实宽高。
+        //   缓冲区是竖的 -> 连接层旋转已生效 -> Vision 用 .up，尺寸照旧
+        //   缓冲区是横的 -> 没生效 -> 在 Vision 这一层补 90° 旋转，并发布旋转后的尺寸
+        // 两种情况骨架都会和画面一致。
+        let bufferIsPortrait = bufferH >= bufferW
+        let visionOrientation: CGImagePropertyOrientation = bufferIsPortrait ? .up : .right
+        let orientedW = bufferIsPortrait ? bufferW : bufferH
+        let orientedH = bufferIsPortrait ? bufferH : bufferW
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
+                                            orientation: visionOrientation,
+                                            options: [:])
         let t0 = CFAbsoluteTimeGetCurrent()
         do {
             try handler.perform([request])
@@ -231,8 +249,9 @@ final class PoseEstimator: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.poses = found
             self.inferenceMS = elapsed
-            if self.videoSize.width != CGFloat(width) || self.videoSize.height != CGFloat(height) {
-                self.videoSize = CGSize(width: width, height: height)
+            let newSize = CGSize(width: orientedW, height: orientedH)
+            if self.videoSize != newSize {
+                self.videoSize = newSize
             }
             if newFPS > 0 { self.fps = newFPS }
         }

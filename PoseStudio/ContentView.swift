@@ -5,9 +5,11 @@ struct ContentView: View {
 
     @StateObject private var settings = Settings()
     @StateObject private var estimator = PoseEstimator()
-    @State private var panelOpen = false
+    // 默认展开：上一版藏在浮动按钮后面，用户根本找不到置信度滑杆
+    @State private var panelOpen = true
 
     private let accent = Color(red: 0.00, green: 0.88, blue: 0.54)
+    private let rotations = [0, 90, 180, 270]
 
     var body: some View {
         ZStack {
@@ -29,23 +31,8 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 Spacer()
-                HStack {
-                    Spacer()
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { panelOpen.toggle() }
-                    } label: {
-                        Image(systemName: panelOpen ? "xmark" : "slider.horizontal.3")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(.black)
-                            .frame(width: 46, height: 46)
-                            .background(accent)
-                            .clipShape(Circle())
-                            .shadow(radius: 6)
-                    }
-                    .padding(.trailing, 16)
-                    .padding(.bottom, panelOpen ? 8 : 24)
-                }
-                if panelOpen { panel.transition(.move(edge: .bottom)) }
+                quickBar
+                if panelOpen { panel }
             }
         }
         .onAppear { syncToEstimator() }
@@ -78,10 +65,71 @@ struct ContentView: View {
         .clipShape(Capsule())
     }
 
+    // MARK: - 常驻快捷条（置信度 + 旋转）
+
+    private var quickBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Text("置信度")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.85))
+                    .frame(width: 48, alignment: .leading)
+                Slider(value: $settings.detectionConfidence, in: 0.10...0.90)
+                    .tint(accent)
+                Text(String(format: "%.2f", settings.detectionConfidence))
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundColor(accent)
+                    .frame(width: 44, alignment: .trailing)
+            }
+
+            HStack(spacing: 6) {
+                Text("旋转")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.85))
+                    .frame(width: 48, alignment: .leading)
+                ForEach(rotations, id: \.self) { deg in
+                    Button {
+                        settings.rotationOverride = deg
+                    } label: {
+                        Text("\(deg)°")
+                            .font(.system(size: 12, weight: settings.rotationOverride == deg ? .bold : .regular))
+                            .foregroundColor(settings.rotationOverride == deg ? .black : .white)
+                            .padding(.horizontal, 10).padding(.vertical, 6)
+                            .background(settings.rotationOverride == deg ? accent : Color.white.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                }
+                Spacer(minLength: 4)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { panelOpen.toggle() }
+                } label: {
+                    Text(panelOpen ? "收起" : "更多设置")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Color.white.opacity(0.85))
+                        .clipShape(Capsule())
+                }
+            }
+
+            if settings.rotationOverride != 0 {
+                Text("骨架方向不对时才需要调旋转；0° 是自动对齐")
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange.opacity(0.9))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(12)
+        .background(Color.black.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 10)
+        .padding(.bottom, panelOpen ? 6 : 12)
+    }
+
     // MARK: - 启动界面
 
     private var startOverlay: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             Text("Pose Studio")
                 .font(.system(size: 26, weight: .bold))
                 .foregroundColor(.white)
@@ -91,8 +139,7 @@ struct ContentView: View {
                 .foregroundColor(.white.opacity(0.6))
 
             Button {
-                estimator.detectionConfidence = Float(settings.detectionConfidence)
-                estimator.maxPeople = Int(settings.maxPeople)
+                syncToEstimator()
                 estimator.start(front: settings.useFrontCamera)
             } label: {
                 Text("开启摄像头")
@@ -102,23 +149,22 @@ struct ContentView: View {
                     .background(accent)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
             }
-            .padding(.top, 8)
+            .padding(.top, 4)
 
             if estimator.permissionDenied {
                 Text(estimator.statusText)
                     .font(.system(size: 12))
                     .foregroundColor(.orange)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 30)
             }
         }
-        .padding(28)
-        .background(Color.black.opacity(0.72))
+        .padding(26)
+        .background(Color.black.opacity(0.75))
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .padding(24)
     }
 
-    // MARK: - 控制面板
+    // MARK: - 详细设置面板
 
     private var panel: some View {
         ScrollView {
@@ -132,8 +178,7 @@ struct ContentView: View {
 
                     HStack(spacing: 10) {
                         Button(estimator.isRunning ? "重新开始" : "开始") {
-                            estimator.detectionConfidence = Float(settings.detectionConfidence)
-                            estimator.maxPeople = Int(settings.maxPeople)
+                            syncToEstimator()
                             estimator.start(front: settings.useFrontCamera)
                         }
                         .buttonStyle(PillButton(background: accent, foreground: .black))
@@ -163,21 +208,21 @@ struct ContentView: View {
                 }
 
                 group("参数") {
-                    sliderRow("检测置信度", $settings.detectionConfidence, 0.1...0.9, "%.2f")
-                    sliderRow("关节阈值", $settings.jointConfidence, 0.05...0.9, "%.2f")
+                    sliderRow("检测置信度", $settings.detectionConfidence, 0.10...0.90, "%.2f")
+                    sliderRow("关节可见度阈值", $settings.jointConfidence, 0.05...0.90, "%.2f")
                     sliderRow("线宽", $settings.lineWidth, 1...10, "%.0f")
                     sliderRow("关节点大小", $settings.jointRadius, 1...12, "%.0f")
                     sliderRow("最多人数", $settings.maxPeople, 1...4, "%.0f")
                 }
 
-                Text("运行状态：\(estimator.statusText)　·　Vision 神经引擎加速，全部在本机处理")
+                Text("状态：\(estimator.statusText)　·　Apple Vision 神经引擎，全部本机处理")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.4))
-                    .padding(.bottom, 24)
+                    .padding(.bottom, 20)
             }
             .padding(16)
         }
-        .frame(maxHeight: 420)
+        .frame(maxHeight: 330)
         .background(Color(red: 0.09, green: 0.09, blue: 0.11).opacity(0.97))
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .padding(.horizontal, 10)

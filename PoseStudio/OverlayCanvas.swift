@@ -42,9 +42,22 @@ struct OverlayCanvas: View {
         let originX = (size.width - drawW) / 2
         let originY = (size.height - drawH) / 2
 
+        // Vision 归一化坐标 -> 视图坐标。
+        // 先按 rotationOverride 做一次兜底旋转，再做 aspect-fill 映射。
+        // 正常情况下 rotationOverride = 0（自动对齐已经对了），
+        // 万一设备方向判断有偏差，用户可以在界面上手动纠正。
+        let rot = settings.rotationOverride
         func screen(_ p: CGPoint) -> CGPoint {
-            CGPoint(x: originX + p.x * drawW,
-                    y: originY + (1.0 - p.y) * drawH)
+            var u = p.x
+            var v = p.y
+            switch rot {
+            case 90:  u = p.y;       v = 1.0 - p.x
+            case 180: u = 1.0 - p.x; v = 1.0 - p.y
+            case 270: u = 1.0 - p.y; v = p.x
+            default:  break
+            }
+            return CGPoint(x: originX + u * drawW,
+                           y: originY + (1.0 - v) * drawH)
         }
 
         let lw = max(1, CGFloat(settings.lineWidth))

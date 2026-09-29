@@ -43,4 +43,8 @@ final class Settings: ObservableObject {
 
     // ---- 摄像头 ----
     @Published var useFrontCamera: Bool = false
+
+    /// 骨架坐标手动旋转兜底（0/90/180/270）。
+    /// 正常情况下自动对齐就已经正确，这里只是万一设备方向判断有偏差时的补救。
+    @Published var rotationOverride: Int = 0
 }
