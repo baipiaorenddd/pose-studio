@@ -1,0 +1,105 @@
+name: Export YOLO pose to Core ML
+
+# 把 Ultralytics 的 YOLO 姿态模型导出成 Core ML（iOS 能直接跑）
+# 需要 macOS：coremltools 只有 macOS/Linux 版本，且 Ultralytics 官方推荐 macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Ultralytics 模型名，例如 yolo26x-pose.pt'
+        required: true
+        default: 'yolo26x-pose.pt'
+      imgsz:
+        description: '输入分辨率'
+        required: true
+        default: '640'
+
+jobs:
+  export:
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 显示环境
+        run: |
+          python --version
+          sw_vers
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install ultralytics coremltools
+
+      - name: 导出 Core ML
+        env:
+          MODEL_NAME: ${{ github.event.inputs.model }}
+          IMGSZ: ${{ github.event.inputs.imgsz }}
+        run: |
+          python - <<'PY'
+          import os
+          from ultralytics import YOLO
+          name = os.environ["MODEL_NAME"]
+          imgsz = int(os.environ["IMGSZ"])
+          print("exporting", name, "imgsz", imgsz, flush=True)
+          m = YOLO(name)
+          out = m.export(format="coreml", nms=True, imgsz=imgsz)
+          print("EXPORTED:", out, flush=True)
+          PY
+
+      - name: 列出产物
+        run: |
+          ls -la
+          find . -maxdepth 3 -name "*.mlpackage" -print
+          du -sh *.mlpackage 2>/dev/null || true
+
+      - name: 打印模型的输入输出规格（关键：写 Swift 解码要用）
+        run: |
+          python - <<'PY'
+          import coremltools as ct, glob, os
+          pkgs = glob.glob("**/*.mlpackage", recursive=True)
+          if not pkgs:
+              raise SystemExit("no .mlpackage produced")
+          for p in pkgs:
+              print("=" * 70)
+              print("PACKAGE:", p)
+              total = 0
+              for root, _, files in os.walk(p):
+                  for f in files:
+                      total += os.path.getsize(os.path.join(root, f))
+              print("SIZE: %.1f MB" % (total / 1e6))
+              ml = ct.models.MLModel(p)
+              spec = ml.get_spec()
+              print("--- INPUTS ---")
+              for i in spec.description.input:
+                  print("  name=%s" % i.name)
+                  print("  type=%s" % i.type)
+              print("--- OUTPUTS ---")
+              for o in spec.description.output:
+                  print("  name=%s" % o.name)
+                  print("  type=%s" % o.type)
+              print("--- MLPROGRAM ---")
+              print(spec.WhichOneof("Type"))
+              print("=" * 70)
+          PY
+
+      - name: 收集产物
+        run: |
+          mkdir -p out
+          find . -maxdepth 2 -name "*.mlpackage" -exec cp -R {} out/ \;
+          ls -la out
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: coreml-pose-model
+          path: out/**
+          retention-days: 14
