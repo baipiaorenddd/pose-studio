@@ -27,11 +27,24 @@ struct CameraPreview: UIViewRepresentable {
         applyOrientation(uiView)
     }
 
-    /// 与 AVCaptureVideoDataOutput 保持一致：竖屏 90°，镜像交给系统自动处理
+    /// 方向 + 镜像，必须和 PoseEstimator 里的数据输出设置严格配套：
+    ///   * 数据输出：永不镜像（automaticallyAdjustsVideoMirroring = false, isVideoMirrored = false）
+    ///   * 预览层  ：前置时镜像
+    ///   * 叠加层  ：前置时把 x 翻过来（overlayMirrored）
+    /// 三处都显式指定，不依赖系统的"自动镜像"，就不会出现骨架左右翻的问题。
     private func applyOrientation(_ view: PreviewUIView) {
         guard let conn = view.previewLayer.connection else { return }
         if conn.isVideoRotationAngleSupported(90) {
             conn.videoRotationAngle = 90
+        }
+
+        let front = view.previewLayer.session?.inputs
+            .compactMap { ($0 as? AVCaptureDeviceInput)?.device.position }
+            .first == .front
+
+        if conn.isVideoMirroringSupported {
+            conn.automaticallyAdjustsVideoMirroring = false
+            conn.isVideoMirrored = front
         }
     }
 }

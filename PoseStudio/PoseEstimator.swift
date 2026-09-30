@@ -18,16 +18,23 @@ struct Joint {
 /// 一个人
 struct Pose: Identifiable {
     let id: Int
-    var points: [Joint?]        // 固定 19 项，索引对应 Self.joints 顺序
+    var points: [Joint?]        // 固定 19 项，索引对应 Self.jointNames 顺序
     var confidence: Float
     var boundingBox: CGRect     // Vision 归一化坐标（原点左下）
+}
+
+/// 一颗物理镜头。切换它就是真正的光学变焦（换镜头），不是裁切放大。
+struct LensOption: Identifiable, Hashable {
+    let id: String
+    let label: String
+    let deviceType: AVCaptureDevice.DeviceType
 }
 
 // MARK: - 姿态推理
 
 final class PoseEstimator: NSObject, ObservableObject {
 
-    // 19 个关节（Apple Vision 人体姿态）
+    // 19 个关节
     static let jointNames: [String] = [
         "鼻", "左眼", "右眼", "左耳", "右耳",
         "颈", "左肩", "右肩", "左肘", "右肘",
@@ -49,7 +56,8 @@ final class PoseEstimator: NSObject, ObservableObject {
 
     static let faceJointIndices: Set<Int> = [1, 2, 3, 4]
 
-    // 发布给界面的状态
+    // MARK: 发布给界面的状态
+
     @Published var poses: [Pose] = []
     @Published var fps: Double = 0
     @Published var inferenceMS: Double = 0
@@ -57,21 +65,32 @@ final class PoseEstimator: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var permissionDenied = false
     @Published var statusText: String = "未启动"
+    @Published var orientationLabel: String = "探测中…"
+
+    /// 当前可用的物理镜头（会随前后置切换而变化）
+    @Published var availableLenses: [LensOption] = []
+    @Published var currentLensID: String = ""
+    @Published var useFrontCamera: Bool = false
+    /// 叠加层是否需要水平镜像（前置摄像头时预览是镜像的）
+    @Published var overlayMirrored: Bool = false
 
     // 由界面同步进来的参数（避免跨线程读 ObservableObject）
     var detectionConfidence: Float = 0.30
     var maxPeople: Int = 1
-    /// 推理帧率上限（1–120），由界面滑杆同步
     var fpsLimit: Double = 30
+    var use3DModel: Bool = false
 
     let session = AVCaptureSession()
 
     private let sessionQueue = DispatchQueue(label: "posestudio.session")
     private let videoQueue = DispatchQueue(label: "posestudio.video")
-    private let request = VNDetectHumanBodyPoseRequest()
+    private let request2D = VNDetectHumanBodyPoseRequest()
+    private let request3D = VNDetectHumanBodyPose3DRequest()
     private var videoOutput: AVCaptureVideoDataOutput?
     private var currentInput: AVCaptureDeviceInput?
-    private var useFront = false
+    private var currentDevice: AVCaptureDevice?
+    private var front = false
+    private var lensID = "wide"
     private var configured = false
 
     private var frameCount = 0
@@ -79,18 +98,21 @@ final class PoseEstimator: NSObject, ObservableObject {
     private var lastProcessAt: CFAbsoluteTime = 0
 
     // ---- 方向自动探测 ----
-    //
-    // 之前是"猜"方向（缓冲区横的就用 .right）。一旦猜错，Vision 拿到的就是
-    // 一张倒过来的图，姿态模型几乎检测不到人 —— 表现就是"识别很弱"。
-    // 现在改成：启动后轮流用 4 个方向各跑若干帧，哪个方向能检测到人就锁定哪个。
     private let orientationList: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
     private var probeScore = [0, 0, 0, 0]
     private var probeCursor = 0
     private var probeFrames = 0
     private var lockedOrientationIndex: Int? = nil
-    @Published var orientationLabel: String = "探测中…"
 
-    private static let visionJoints: [(VNHumanBodyPoseObservation.JointName, Int)] = [
+    private static let vision2DJoints: [(VNHumanBodyPoseObservation.JointName, Int)] = [
+        (.nose, 0), (.leftEye, 1), (.rightEye, 2), (.leftEar, 3), (.rightEar, 4),
+        (.neck, 5), (.leftShoulder, 6), (.rightShoulder, 7),
+        (.leftElbow, 8), (.rightElbow, 9), (.leftWrist, 10), (.rightWrist, 11),
+        (.leftHip, 12), (.rightHip, 13), (.leftKnee, 14), (.rightKnee, 15),
+        (.leftAnkle, 16), (.rightAnkle, 17), (.root, 18),
+    ]
+
+    private static let vision3DJoints: [(VNHumanBodyPose3DObservation.JointName, Int)] = [
         (.nose, 0), (.leftEye, 1), (.rightEye, 2), (.leftEar, 3), (.rightEar, 4),
         (.neck, 5), (.leftShoulder, 6), (.rightShoulder, 7),
         (.leftElbow, 8), (.rightElbow, 9), (.leftWrist, 10), (.rightWrist, 11),
@@ -107,19 +129,10 @@ final class PoseEstimator: NSObject, ObservableObject {
         }
     }
 
-    /// 重新开始方向探测（切前后摄像头、重启会话时调用）
-    func resetOrientationProbe() {
-        lockedOrientationIndex = nil
-        probeScore = [0, 0, 0, 0]
-        probeCursor = 0
-        probeFrames = 0
-        DispatchQueue.main.async { self.orientationLabel = "探测中…" }
-    }
-
     // MARK: 权限 + 启动
 
-    func start(front: Bool) {
-        useFront = front
+    func start(front isFront: Bool) {
+        front = isFront
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             permissionDenied = false
@@ -145,7 +158,9 @@ final class PoseEstimator: NSObject, ObservableObject {
             if !self.session.isRunning { self.session.startRunning() }
             DispatchQueue.main.async {
                 self.isRunning = true
-                self.statusText = self.useFront ? "前置摄像头" : "后置摄像头"
+                self.useFrontCamera = self.front
+                self.overlayMirrored = self.front
+                self.statusText = (self.front ? "前置" : "后置") + " · " + self.currentLensLabel()
             }
         }
     }
@@ -161,27 +176,44 @@ final class PoseEstimator: NSObject, ObservableObject {
         }
     }
 
-    /// 切换前后摄像头：重建输入
-    func switchCamera(front: Bool) {
-        useFront = front
-        resetOrientationProbe()
-        sessionQueue.async {
-            guard self.configured else { return }
-            self.session.beginConfiguration()
-            if let old = self.currentInput {
-                self.session.removeInput(old)
-                self.currentInput = nil
+    // MARK: 镜头发现（光学变焦的关键）
+
+    private func discoverLenses(position: AVCaptureDevice.Position) -> [LensOption] {
+        let types: [AVCaptureDevice.DeviceType] = [
+            .builtInUltraWideCamera, .builtInWideAngleCamera, .builtInTelephotoCamera,
+        ]
+        let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: types,
+                                                         mediaType: .video,
+                                                         position: position)
+        var out: [LensOption] = []
+        for device in discovery.devices {
+            let key: String
+            let label: String
+            switch device.deviceType {
+            case .builtInUltraWideCamera: key = "ultrawide"; label = "0.5×"
+            case .builtInTelephotoCamera: key = "tele";      label = "长焦"
+            default:                      key = "wide";      label = "1×"
             }
-            let position: AVCaptureDevice.Position = front ? .front : .back
-            if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
-               let input = try? AVCaptureDeviceInput(device: device),
-               self.session.canAddInput(input) {
-                self.session.addInput(input)
-                self.currentInput = input
+            if !out.contains(where: { $0.id == key }) {
+                out.append(LensOption(id: key, label: label, deviceType: device.deviceType))
             }
-            self.applyConnectionSettings(position: position)
-            self.session.commitConfiguration()
         }
+        let order = ["ultrawide": 0, "wide": 1, "tele": 2]
+        out.sort { (order[$0.id] ?? 9) < (order[$1.id] ?? 9) }
+        return out
+    }
+
+    private func currentLensLabel() -> String {
+        if let l = availableLenses.first(where: { $0.id == lensID }) { return l.label }
+        return lensID
+    }
+
+    private func deviceForCurrentLens() -> AVCaptureDevice? {
+        let position: AVCaptureDevice.Position = front ? .front : .back
+        let type = availableLenses.first(where: { $0.id == lensID })?.deviceType
+            ?? .builtInWideAngleCamera
+        if let d = AVCaptureDevice.default(type, for: .video, position: position) { return d }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
     }
 
     // MARK: 会话配置
@@ -191,8 +223,13 @@ final class PoseEstimator: NSObject, ObservableObject {
         session.beginConfiguration()
         session.sessionPreset = .hd1280x720
 
-        let position: AVCaptureDevice.Position = useFront ? .front : .back
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+        let position: AVCaptureDevice.Position = front ? .front : .back
+        let lenses = discoverLenses(position: position)
+        if !lenses.isEmpty && !lenses.contains(where: { $0.id == lensID }) {
+            lensID = lenses.first(where: { $0.id == "wide" })?.id ?? lenses[0].id
+        }
+
+        guard let device = deviceForCurrentLens(),
               let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input) else {
             session.commitConfiguration()
@@ -201,6 +238,7 @@ final class PoseEstimator: NSObject, ObservableObject {
         }
         session.addInput(input)
         currentInput = input
+        currentDevice = device
 
         let output = AVCaptureVideoDataOutput()
         output.alwaysDiscardsLateVideoFrames = true
@@ -213,28 +251,124 @@ final class PoseEstimator: NSObject, ObservableObject {
             videoOutput = output
         }
 
-        applyConnectionSettings(position: position)
+        applyConnectionSettings(dataMirrored: false)
         session.commitConfiguration()
+
+        applyFrameRate(device, fps: fpsLimit)
+
         configured = true
+        DispatchQueue.main.async {
+            self.availableLenses = lenses
+            self.currentLensID = self.lensID
+        }
     }
 
-    /// 让数据输出与预览层方向一致：竖屏旋转 90°，前置摄像头镜像
-    private func applyConnectionSettings(position: AVCaptureDevice.Position) {
+    /// 方向 + 镜像。
+    ///
+    /// 镜像这点必须完全确定：数据输出**永不镜像**，预览层前置时镜像，
+    /// 叠加层在前置时把 x 翻过来。三处显式对齐，就不存在"谁自动谁没自动"的错位。
+    private func applyConnectionSettings(dataMirrored: Bool) {
         guard let conn = videoOutput?.connection(with: .video) else { return }
         if conn.isVideoRotationAngleSupported(90) {
             conn.videoRotationAngle = 90
         }
         if conn.isVideoMirroringSupported {
             conn.automaticallyAdjustsVideoMirroring = false
-            conn.isVideoMirrored = (position == .front)
+            conn.isVideoMirrored = dataMirrored
         }
+    }
+
+    /// 真正的帧率控制：改采集设备本身的帧率。
+    /// 之前只做了软件丢帧（只能降不能升），所以往上调完全没反应。
+    private func applyFrameRate(_ device: AVCaptureDevice, fps: Double) {
+        let target = Float(min(max(fps, 1), 120))
+        do {
+            try device.lockForConfiguration()
+            let ranges = device.activeFormat.videoSupportedFrameRateRanges
+            // 只有落在支持区间内才去设，否则会抛 ObjC 异常（Swift 抓不住）
+            let supported = ranges.contains { target >= $0.minFrameRate && target <= $0.maxFrameRate }
+            if supported {
+                let dur = CMTime(value: 1, timescale: CMTimeScale(target))
+                device.activeVideoMinFrameDuration = dur
+                device.activeVideoMaxFrameDuration = dur
+            }
+            device.unlockForConfiguration()
+        } catch {
+            // 设不了就算了，软件跳帧仍然生效
+        }
+    }
+
+    func updateFrameRate(_ fps: Double) {
+        sessionQueue.async {
+            guard let d = self.currentDevice else { return }
+            self.applyFrameRate(d, fps: fps)
+        }
+    }
+
+    // MARK: 切换摄像头 / 镜头
+
+    func switchCamera(front isFront: Bool) {
+        front = isFront
+        resetOrientationProbe()
+        sessionQueue.async {
+            self.rebuildInput()
+        }
+    }
+
+    func switchLens(_ id: String) {
+        lensID = id
+        resetOrientationProbe()
+        sessionQueue.async {
+            self.rebuildInput()
+        }
+    }
+
+    private func rebuildInput() {
+        let position: AVCaptureDevice.Position = front ? .front : .back
+        let lenses = discoverLenses(position: position)
+        if !lenses.isEmpty && !lenses.contains(where: { $0.id == lensID }) {
+            lensID = lenses.first(where: { $0.id == "wide" })?.id ?? lenses[0].id
+        }
+
+        session.beginConfiguration()
+        if let old = currentInput {
+            session.removeInput(old)
+            currentInput = nil
+        }
+        guard let device = deviceForCurrentLens(),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            session.commitConfiguration()
+            return
+        }
+        session.addInput(input)
+        currentInput = input
+        currentDevice = device
+        applyConnectionSettings(dataMirrored: false)
+        session.commitConfiguration()
+        applyFrameRate(device, fps: fpsLimit)
+
+        DispatchQueue.main.async {
+            self.availableLenses = lenses
+            self.currentLensID = self.lensID
+            self.overlayMirrored = self.front
+            self.statusText = (self.front ? "前置" : "后置") + " · " + self.currentLensLabel()
+        }
+    }
+
+    /// 重新开始方向探测
+    func resetOrientationProbe() {
+        lockedOrientationIndex = nil
+        probeScore = [0, 0, 0, 0]
+        probeCursor = 0
+        probeFrames = 0
+        DispatchQueue.main.async { self.orientationLabel = "探测中…" }
     }
 
     // MARK: 每帧推理
 
     fileprivate func handle(pixelBuffer: CVPixelBuffer) {
-        // ---- 帧率上限（1–120）----
-        // 超出的帧直接丢掉，不进入推理。
+        // 软件帧率兜底（设备帧率设不上去时仍然有效）
         let now0 = CFAbsoluteTimeGetCurrent()
         if fpsLimit >= 1 {
             let minInterval = 1.0 / min(max(fpsLimit, 1.0), 120.0)
@@ -245,16 +379,9 @@ final class PoseEstimator: NSObject, ObservableObject {
         let bufferW = CVPixelBufferGetWidth(pixelBuffer)
         let bufferH = CVPixelBufferGetHeight(pixelBuffer)
 
-        // ---- 方向：自动探测，不再猜 ----
-        let orientationIndex: Int
-        if let locked = lockedOrientationIndex {
-            orientationIndex = locked
-        } else {
-            orientationIndex = probeCursor
-        }
+        // 方向：自动探测，不再猜
+        let orientationIndex = lockedOrientationIndex ?? probeCursor
         let visionOrientation = orientationList[orientationIndex]
-
-        // 旋转 90°/270° 时，Vision 看到的画面宽高互换
         let swapped = (visionOrientation == .left || visionOrientation == .right)
         let orientedW = swapped ? bufferH : bufferW
         let orientedH = swapped ? bufferW : bufferH
@@ -263,31 +390,34 @@ final class PoseEstimator: NSObject, ObservableObject {
                                             orientation: visionOrientation,
                                             options: [:])
         let t0 = CFAbsoluteTimeGetCurrent()
-        do {
-            try handler.perform([request])
-        } catch {
-            return
-        }
-        let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
 
         var found: [Pose] = []
-        if let observations = request.results {
-            let limit = max(1, maxPeople)
-            for (i, obs) in observations.prefix(limit).enumerated() {
-                if let pose = Self.buildPose(obs, index: i, minConfidence: detectionConfidence) {
-                    found.append(pose)
+        if use3DModel {
+            do { try handler.perform([request3D]) } catch { return }
+            if let observations = request3D.results {
+                for (i, obs) in observations.prefix(max(1, maxPeople)).enumerated() {
+                    if let pose = Self.buildPose3D(obs, index: i) { found.append(pose) }
+                }
+            }
+        } else {
+            do { try handler.perform([request2D]) } catch { return }
+            if let observations = request2D.results {
+                for (i, obs) in observations.prefix(max(1, maxPeople)).enumerated() {
+                    if let pose = Self.buildPose2D(obs, index: i,
+                                                   minConfidence: detectionConfidence) {
+                        found.append(pose)
+                    }
                 }
             }
         }
+        let elapsed = (CFAbsoluteTimeGetCurrent() - t0) * 1000
 
-        // ---- 探测阶段：累计每个方向的检测命中数，够了就锁定 ----
+        // 探测阶段：累计每个方向的命中数，够了就锁定
         var lockedNow: Int? = nil
         if lockedOrientationIndex == nil {
             probeScore[orientationIndex] += found.count
             probeFrames += 1
             probeCursor = (probeCursor + 1) % orientationList.count
-
-            // 每 8 帧（每个方向 2 帧）评估一次
             if probeFrames >= orientationList.count * 2 {
                 probeFrames = 0
                 var bestIdx = 0
@@ -296,7 +426,6 @@ final class PoseEstimator: NSObject, ObservableObject {
                     bestVal = v
                     bestIdx = i
                 }
-                // 只有在确实检测到过人才锁定；全是 0 就继续试探
                 if bestVal > 0 {
                     lockedOrientationIndex = bestIdx
                     lockedNow = bestIdx
@@ -318,22 +447,22 @@ final class PoseEstimator: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.poses = found
             self.inferenceMS = elapsed
-            if let l = lockToPublish {
+            if let _ = lockToPublish {
                 self.orientationLabel = labelToPublish + " 已锁定"
             } else if self.lockedOrientationIndex == nil {
                 self.orientationLabel = "探测中（" + labelToPublish + "）"
             }
             let newSize = CGSize(width: orientedW, height: orientedH)
-            if self.videoSize != newSize {
-                self.videoSize = newSize
-            }
+            if self.videoSize != newSize { self.videoSize = newSize }
             if newFPS > 0 { self.fps = newFPS }
         }
     }
 
-    private static func buildPose(_ obs: VNHumanBodyPoseObservation,
-                                  index: Int,
-                                  minConfidence: Float) -> Pose? {
+    // MARK: 把人拼成 Pose
+
+    private static func buildPose2D(_ obs: VNHumanBodyPoseObservation,
+                                    index: Int,
+                                    minConfidence: Float) -> Pose? {
         guard let recognized = try? obs.recognizedPoints(.all) else { return nil }
 
         var slots = [Joint?](repeating: nil, count: jointNames.count)
@@ -342,7 +471,7 @@ final class PoseEstimator: NSObject, ObservableObject {
         var confSum: Float = 0
         var confCount = 0
 
-        for (jointName, slot) in visionJoints {
+        for (jointName, slot) in vision2DJoints {
             guard let p = recognized[jointName] else { continue }
             slots[slot] = Joint(index: slot, name: jointNames[slot],
                                 position: p.location, confidence: p.confidence)
@@ -361,6 +490,30 @@ final class PoseEstimator: NSObject, ObservableObject {
         let box = CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
         let avg = confCount > 0 ? confSum / Float(confCount) : 0
         return Pose(id: index, points: slots, confidence: avg, boundingBox: box)
+    }
+
+    /// 3D 姿态模型（iOS 17+）。官方说对遮挡/背影这类难视角鲁棒性明显更好。
+    /// 用 pointInImage 取 2D 投影来画骨架。
+    private static func buildPose3D(_ obs: VNHumanBodyPose3DObservation, index: Int) -> Pose? {
+        var slots = [Joint?](repeating: nil, count: jointNames.count)
+        var minX = 1.0, minY = 1.0, maxX = 0.0, maxY = 0.0
+        var any = false
+        let conf = obs.confidence
+
+        for (jointName, slot) in vision3DJoints {
+            guard let p = try? obs.pointInImage(jointName) else { continue }
+            slots[slot] = Joint(index: slot, name: jointNames[slot],
+                                position: p, confidence: conf)
+            any = true
+            minX = min(minX, Double(p.x))
+            maxX = max(maxX, Double(p.x))
+            minY = min(minY, Double(p.y))
+            maxY = max(maxY, Double(p.y))
+        }
+
+        guard any else { return nil }
+        let box = CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
+        return Pose(id: index, points: slots, confidence: conf, boundingBox: box)
     }
 }
 

@@ -5,7 +5,6 @@ struct ContentView: View {
 
     @StateObject private var settings = Settings()
     @StateObject private var estimator = PoseEstimator()
-    // 默认展开：上一版藏在浮动按钮后面，用户根本找不到置信度滑杆
     @State private var panelOpen = true
 
     private let accent = Color(red: 0.00, green: 0.88, blue: 0.54)
@@ -15,17 +14,12 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // 画面后处理：这些是真正作用在摄像头图像上的滤镜
             CameraPreview(session: estimator.session)
-                .saturation(settings.saturation)
-                .contrast(settings.contrast)
-                .brightness(settings.brightness)
-                .grayscale(settings.grayscale ? 1.0 : 0.0)
-                .invertIf(settings.invertColors)
                 .ignoresSafeArea()
 
             OverlayCanvas(poses: estimator.poses,
                           videoSize: estimator.videoSize,
+                          mirrored: estimator.overlayMirrored,
                           settings: settings)
 
             VStack(spacing: 0) {
@@ -44,7 +38,11 @@ struct ContentView: View {
         .onAppear { syncToEstimator() }
         .onChange(of: settings.detectionConfidence) { _, v in estimator.detectionConfidence = Float(v) }
         .onChange(of: settings.maxPeople) { _, v in estimator.maxPeople = Int(v) }
-        .onChange(of: settings.fpsLimit) { _, v in estimator.fpsLimit = v }
+        .onChange(of: settings.use3DModel) { _, v in estimator.use3DModel = v }
+        .onChange(of: settings.fpsLimit) { _, v in
+            estimator.fpsLimit = v
+            estimator.updateFrameRate(v)     // 真正去改采集设备帧率
+        }
         .onChange(of: settings.useFrontCamera) { _, v in estimator.switchCamera(front: v) }
     }
 
@@ -73,38 +71,68 @@ struct ContentView: View {
         .clipShape(Capsule())
     }
 
-    // MARK: - 常驻快捷条（置信度 + 旋转）
+    // MARK: - 常驻快捷条
 
     private var quickBar: some View {
         VStack(spacing: 8) {
+
+            // 置信度
             HStack(spacing: 10) {
                 Text("置信度")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.white.opacity(0.85))
-                    .frame(width: 48, alignment: .leading)
+                    .frame(width: 46, alignment: .leading)
                 Slider(value: $settings.detectionConfidence, in: 0.10...0.90)
                     .tint(accent)
                 Text(String(format: "%.2f", settings.detectionConfidence))
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundColor(accent)
-                    .frame(width: 44, alignment: .trailing)
+                    .frame(width: 42, alignment: .trailing)
             }
 
+            // 摄像头（点按，不用滑动开关）
+            HStack(spacing: 6) {
+                Text("摄像头")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white.opacity(0.85))
+                    .frame(width: 46, alignment: .leading)
+                pillButton("后置", active: !estimator.useFrontCamera) {
+                    settings.useFrontCamera = false
+                }
+                pillButton("前置", active: estimator.useFrontCamera) {
+                    settings.useFrontCamera = true
+                }
+                Spacer(minLength: 0)
+            }
+
+            // 光学变焦：切换物理镜头
+            if !estimator.availableLenses.isEmpty {
+                HStack(spacing: 6) {
+                    Text("倍率")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
+                        .frame(width: 46, alignment: .leading)
+                    ForEach(estimator.availableLenses) { lens in
+                        pillButton(lens.label, active: estimator.currentLensID == lens.id) {
+                            estimator.switchLens(lens.id)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Text("光学")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+            }
+
+            // 旋转兜底 + 展开设置
             HStack(spacing: 6) {
                 Text("旋转")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.white.opacity(0.85))
-                    .frame(width: 48, alignment: .leading)
+                    .frame(width: 46, alignment: .leading)
                 ForEach(rotations, id: \.self) { deg in
-                    Button {
+                    pillButton("\(deg)°", active: settings.rotationOverride == deg) {
                         settings.rotationOverride = deg
-                    } label: {
-                        Text("\(deg)°")
-                            .font(.system(size: 12, weight: settings.rotationOverride == deg ? .bold : .regular))
-                            .foregroundColor(settings.rotationOverride == deg ? .black : .white)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(settings.rotationOverride == deg ? accent : Color.white.opacity(0.12))
-                            .clipShape(Capsule())
                     }
                 }
                 Spacer(minLength: 4)
@@ -119,18 +147,23 @@ struct ContentView: View {
                         .clipShape(Capsule())
                 }
             }
-
-            if settings.rotationOverride != 0 {
-                Text("骨架方向不对时才需要调旋转；0° 是自动对齐")
-                    .font(.system(size: 10))
-                    .foregroundColor(.orange.opacity(0.9))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .padding(.horizontal, 10)
         .padding(.bottom, panelOpen ? 6 : 12)
+    }
+
+    private func pillButton(_ title: String, active: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: active ? .bold : .regular))
+                .foregroundColor(active ? .black : .white)
+                .padding(.horizontal, 11).padding(.vertical, 6)
+                .background(active ? accent : Color.white.opacity(0.12))
+                .clipShape(Capsule())
+        }
     }
 
     // MARK: - 启动界面
@@ -140,7 +173,7 @@ struct ContentView: View {
             Text("Pose Studio")
                 .font(.system(size: 26, weight: .bold))
                 .foregroundColor(.white)
-            Text("实时人体姿态识别\n骨架 / 边界框 / 连线，逐项独立开关")
+            Text("实时人体姿态识别\n骨架 / 边界框，逐项独立开关")
                 .font(.system(size: 13))
                 .multilineTextAlignment(.center)
                 .foregroundColor(.white.opacity(0.6))
@@ -178,11 +211,6 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 16) {
 
                 group("数据源") {
-                    Toggle(isOn: $settings.useFrontCamera) {
-                        Text("使用前置摄像头").font(.system(size: 14))
-                    }
-                    .toggleStyle(SwitchToggleStyle(tint: accent))
-
                     HStack(spacing: 10) {
                         Button(estimator.isRunning ? "重新开始" : "开始") {
                             syncToEstimator()
@@ -193,29 +221,10 @@ struct ContentView: View {
                         Button("停止") { estimator.stop() }
                             .buttonStyle(PillButton(background: Color(white: 0.25), foreground: .white))
                     }
-                    .padding(.top, 4)
-                }
-
-                group("★ 特效 · 画面后处理") {
-                    toggleRow("反色", $settings.invertColors)
-                    toggleRow("黑白", $settings.grayscale)
-                    sliderRow("饱和度", $settings.saturation, 0...2, "%.2f")
-                    sliderRow("对比度", $settings.contrast, 0.5...2, "%.2f")
-                    sliderRow("亮度", $settings.brightness, -0.5...0.5, "%.2f")
-                }
-
-                group("★ 特效 · 叠加层") {
-                    toggleRow("骨架发光", $settings.glowEffect)
-                    toggleRow("头部呼吸脉冲", $settings.headPulse)
-                    toggleRow("扫描线", $settings.scanlines)
-                    toggleRow("噪点 / 雪花", $settings.noiseEffect)
-                    toggleRow("暗角", $settings.vignette)
-                    toggleRow("HUD 网格", $settings.gridOverlay)
                 }
 
                 group("显示元素（独立开关）") {
                     toggleRow("骨架连线", $settings.showSkeleton)
-                    toggleRow("关节圆点", $settings.showKeypoints)
                     toggleRow("边界框", $settings.showBox)
                     toggleRow("标签 + 置信度", $settings.showLabel)
                     toggleRow("人物编号 #N", $settings.showIDs)
@@ -226,34 +235,37 @@ struct ContentView: View {
                 group("样式") {
                     toggleRow("火柴人头部（圆圈）", $settings.stickHead)
                     toggleRow("头部圆圈填充", $settings.headFill)
-                    toggleRow("分区配色", $settings.groupColors)
+                    toggleRow("分区配色（关 = 白色骨架）", $settings.groupColors)
                     toggleRow("四角括号框", $settings.cornerBox)
                     toggleRow("压暗背景突出骨架", $settings.dimBackground)
                     toggleRow("隐藏低置信度关节", $settings.hideLowConfidence)
                     toggleRow("显示帧率 / 人数", $settings.showHUD)
                 }
 
-                group("参数") {
+                group("识别") {
+                    toggleRow("3D 姿态模型（更稳，稍慢）", $settings.use3DModel)
                     sliderRow("推理帧率上限", $settings.fpsLimit, 1...120, "%.0f")
                     sliderRow("检测置信度", $settings.detectionConfidence, 0.10...0.90, "%.2f")
                     sliderRow("关节可见度阈值", $settings.jointConfidence, 0.05...0.90, "%.2f")
-                    sliderRow("线宽", $settings.lineWidth, 1...10, "%.0f")
-                    sliderRow("关节点大小", $settings.jointRadius, 1...12, "%.0f")
                     sliderRow("最多人数", $settings.maxPeople, 1...4, "%.0f")
                 }
 
-                Text("识别方向：\(estimator.orientationLabel)　·　程序会自动试探并锁定正确方向")
+                group("外观") {
+                    sliderRow("线宽", $settings.lineWidth, 1...10, "%.0f")
+                }
+
+                Text("识别方向：\(estimator.orientationLabel)　·　程序自动试探并锁定")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
 
-                Text("状态：\(estimator.statusText)　·　Apple Vision 神经引擎，全部本机处理")
+                Text("状态：\(estimator.statusText)")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.4))
                     .padding(.bottom, 20)
             }
             .padding(16)
         }
-        .frame(maxHeight: 330)
+        .frame(maxHeight: 340)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
@@ -299,6 +311,7 @@ struct ContentView: View {
         estimator.detectionConfidence = Float(settings.detectionConfidence)
         estimator.maxPeople = Int(settings.maxPeople)
         estimator.fpsLimit = settings.fpsLimit
+        estimator.use3DModel = settings.use3DModel
     }
 }
 
@@ -316,15 +329,5 @@ struct PillButton: ButtonStyle {
             .padding(.vertical, 10)
             .background(background.opacity(configuration.isPressed ? 0.6 : 1))
             .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-// MARK: - 条件反色
-// SwiftUI 内置的 colorInvert() 不接受参数，这里包一层让它可开关。
-
-extension View {
-    @ViewBuilder
-    func invertIf(_ on: Bool) -> some View {
-        if on { self.colorInvert() } else { self }
     }
 }

@@ -3,12 +3,14 @@ import Foundation
 
 // MARK: - 叠加层画布
 //
-// 关键：把 Vision 的归一化坐标（原点左下）映射到画面。
+// 把 Vision 的归一化坐标（原点左下）映射到画面。
 // 预览层用 .resizeAspectFill，这里的映射公式与之完全一致，保证骨骼贴合人体。
 
 struct OverlayCanvas: View {
     let poses: [Pose]
     let videoSize: CGSize
+    /// 前置摄像头时预览是镜像的，骨架也要跟着镜像，否则左右会反
+    let mirrored: Bool
     @ObservedObject var settings: Settings
 
     private static let palette: [Color] = [
@@ -29,72 +31,9 @@ struct OverlayCanvas: View {
     // MARK: 绘制
 
     private func draw(ctx: GraphicsContext, size: CGSize) {
-        let now = Date().timeIntervalSince1970
-
         if settings.dimBackground {
             ctx.fill(Path(CGRect(origin: .zero, size: size)),
                      with: .color(Color.black.opacity(0.55)))
-        }
-
-        // ---- 暗角：四周压暗，中间提亮 ----
-        if settings.vignette {
-            let grad = Gradient(colors: [Color.clear, Color.black.opacity(0.78)])
-            ctx.fill(Path(CGRect(origin: .zero, size: size)),
-                     with: .radialGradient(grad,
-                                           center: CGPoint(x: size.width / 2, y: size.height / 2),
-                                           startRadius: min(size.width, size.height) * 0.32,
-                                           endRadius: max(size.width, size.height) * 0.72))
-        }
-
-        // ---- HUD 网格 ----
-        if settings.gridOverlay {
-            var g = Path()
-            var gx: CGFloat = 0
-            while gx < size.width {
-                g.move(to: CGPoint(x: gx, y: 0))
-                g.addLine(to: CGPoint(x: gx, y: size.height))
-                gx += 64
-            }
-            var gy: CGFloat = 0
-            while gy < size.height {
-                g.move(to: CGPoint(x: 0, y: gy))
-                g.addLine(to: CGPoint(x: size.width, y: gy))
-                gy += 64
-            }
-            ctx.stroke(g, with: .color(Color.white.opacity(0.10)), lineWidth: 1)
-        }
-
-        // ---- 扫描线：整屏横线合成一条 Path 一次描边，比逐条 stroke 快得多 ----
-        if settings.scanlines {
-            var lines = Path()
-            var y: CGFloat = 0
-            while y < size.height {
-                lines.move(to: CGPoint(x: 0, y: y))
-                lines.addLine(to: CGPoint(x: size.width, y: y))
-                y += 5
-            }
-            ctx.stroke(lines, with: .color(Color.black.opacity(0.18)), lineWidth: 1)
-        }
-
-        // ---- 噪点 / 雪花（用轻量 LCG 生成，每帧不同）----
-        if settings.noiseEffect {
-            var seed = UInt64(now * 1000) &+ 0x9E3779B97F4A7C15
-            func rnd() -> CGFloat {
-                seed = seed &* 6364136223846793005 &+ 1442695040888963407
-                return CGFloat((seed >> 33) % 100000) / 100000.0
-            }
-            var dots = Path()
-            for _ in 0..<180 {
-                dots.addRect(CGRect(x: rnd() * size.width, y: rnd() * size.height,
-                                    width: 1.7, height: 1.7))
-            }
-            ctx.fill(dots, with: .color(Color.white.opacity(0.20)))
-            var dark = Path()
-            for _ in 0..<120 {
-                dark.addRect(CGRect(x: rnd() * size.width, y: rnd() * size.height,
-                                    width: 1.7, height: 1.7))
-            }
-            ctx.fill(dark, with: .color(Color.black.opacity(0.22)))
         }
 
         guard videoSize.width > 1, videoSize.height > 1, !poses.isEmpty else { return }
@@ -106,10 +45,6 @@ struct OverlayCanvas: View {
         let originX = (size.width - drawW) / 2
         let originY = (size.height - drawH) / 2
 
-        // Vision 归一化坐标 -> 视图坐标。
-        // 先按 rotationOverride 做一次兜底旋转，再做 aspect-fill 映射。
-        // 正常情况下 rotationOverride = 0（自动对齐已经对了），
-        // 万一设备方向判断有偏差，用户可以在界面上手动纠正。
         let rot = settings.rotationOverride
         func screen(_ p: CGPoint) -> CGPoint {
             var u = p.x
@@ -120,17 +55,19 @@ struct OverlayCanvas: View {
             case 270: u = 1.0 - p.y; v = p.x
             default:  break
             }
+            if mirrored { u = 1.0 - u }
             return CGPoint(x: originX + u * drawW,
                            y: originY + (1.0 - v) * drawH)
         }
 
         let lw = max(1, CGFloat(settings.lineWidth))
-        let radius = max(1.5, CGFloat(settings.jointRadius))
         let kconf = Float(settings.jointConfidence)
 
         for (index, pose) in poses.enumerated() {
-            let base = Self.palette[index % Self.palette.count]
-            // 火柴人模式下也一并隐藏面部关键点，让头部只剩一个圆圈
+            // 分区配色关闭时 = 纯白骨架
+            let base: Color = settings.groupColors
+                ? Self.palette[index % Self.palette.count]
+                : Color.white
             let hideFace = settings.stickHead || !settings.showFacePoints
 
             // ---------- 骨架连线 ----------
@@ -146,27 +83,17 @@ struct OverlayCanvas: View {
                     path.addLine(to: screen(jb.position))
 
                     let color = settings.groupColors ? groupColor(group) : base
-                    // 发光：先用更宽的低透明度线打出光晕，再画实线
-                    if settings.glowEffect {
-                        ctx.stroke(path, with: .color(color.opacity(0.28)),
-                                   style: StrokeStyle(lineWidth: lw * 3.4, lineCap: .round))
-                        ctx.stroke(path, with: .color(color.opacity(0.45)),
-                                   style: StrokeStyle(lineWidth: lw * 2.0, lineCap: .round))
-                    }
                     ctx.stroke(path, with: .color(color),
                                style: StrokeStyle(lineWidth: lw, lineCap: .round))
-                    ctx.stroke(path, with: .color(Color.white.opacity(0.85)),
-                               style: StrokeStyle(lineWidth: max(1, lw - 2), lineCap: .round))
                 }
             }
 
-            // ---------- 火柴人头部（圆圈）----------
+            // ---------- 火柴人头部（圆圈，纯线条、不填充）----------
             if settings.stickHead, let head = headCircle(pose, screen: screen, minConf: kconf) {
                 let headColor = settings.groupColors ? groupColor("head") : base
-                // 半径做个体检，防止关键点异常时画出一个巨大的圆
                 let hr = min(max(head.radius, 6), min(size.width, size.height) * 0.25)
 
-                // 脖子 -> 圆圈下缘的连线，填上隐藏面部关键点后留下的缺口
+                // 脖子 -> 圆圈下缘的连线，补上隐藏面部关键点后留下的缺口
                 if let neckJoint = pose.points[5], neckJoint.confidence >= kconf {
                     let neckPt = screen(neckJoint.position)
                     let dx = neckPt.x - head.center.x
@@ -183,41 +110,15 @@ struct OverlayCanvas: View {
                     }
                 }
 
-                // 呼吸脉冲：半径轻微起伏，让圆圈"活"起来
-                var drawR = hr
-                if settings.headPulse {
-                    drawR = hr * (1.0 + 0.055 * CGFloat(sin(now * 3.4)))
-                }
-
-                let circleRect = CGRect(x: head.center.x - drawR,
-                                        y: head.center.y - drawR,
-                                        width: drawR * 2,
-                                        height: drawR * 2)
-                let circlePath = Path(ellipseIn: circleRect)
-                // 默认「纯线条 + 零填充」= 完全透明的火柴人头。
-                // 这里刻意不再加发光光晕 —— 粗光晕在小圆上会看起来像一层背景。
+                let circlePath = Path(ellipseIn: CGRect(x: head.center.x - hr,
+                                                        y: head.center.y - hr,
+                                                        width: hr * 2,
+                                                        height: hr * 2))
                 if settings.headFill {
                     ctx.fill(circlePath, with: .color(headColor.opacity(0.20)))
                 }
                 ctx.stroke(circlePath, with: .color(headColor),
                            style: StrokeStyle(lineWidth: lw, lineCap: .round))
-            }
-
-            // ---------- 关节圆点 ----------
-            if settings.showKeypoints {
-                for (i, maybe) in pose.points.enumerated() {
-                    guard let j = maybe else { continue }
-                    if settings.hideLowConfidence && j.confidence < kconf { continue }
-                    if hideFace && PoseEstimator.faceJointIndices.contains(i) { continue }
-
-                    let p = screen(j.position)
-                    let outer = Path(ellipseIn: CGRect(x: p.x - radius - 1.5, y: p.y - radius - 1.5,
-                                                      width: (radius + 1.5) * 2, height: (radius + 1.5) * 2))
-                    ctx.fill(outer, with: .color(.white))
-                    let inner = Path(ellipseIn: CGRect(x: p.x - radius, y: p.y - radius,
-                                                      width: radius * 2, height: radius * 2))
-                    ctx.fill(inner, with: .color(settings.groupColors ? jointColor(i, base) : base))
-                }
             }
 
             // ---------- 关节名称 ----------
@@ -230,15 +131,14 @@ struct OverlayCanvas: View {
                     let label = Text(j.name)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.white)
-                    ctx.draw(label, at: CGPoint(x: p.x + radius + 5, y: p.y - radius - 8),
-                             anchor: .leading)
+                    ctx.draw(label, at: CGPoint(x: p.x + 5, y: p.y - 8), anchor: .leading)
                 }
             }
 
             // ---------- 边界框 + 标签 ----------
             let box = pose.boundingBox
-            let p1 = screen(CGPoint(x: box.minX, y: box.maxY))   // 屏幕左上
-            let p2 = screen(CGPoint(x: box.maxX, y: box.minY))   // 屏幕右下
+            let p1 = screen(CGPoint(x: box.minX, y: box.maxY))
+            let p2 = screen(CGPoint(x: box.maxX, y: box.minY))
             let pad: CGFloat = 14
             let rect = CGRect(x: min(p1.x, p2.x) - pad,
                               y: min(p1.y, p2.y) - pad,
@@ -258,7 +158,8 @@ struct OverlayCanvas: View {
                 if settings.showLabel { parts.append("人 \(Int(pose.confidence * 100))%") }
                 if settings.showIDs { parts.append("#\(pose.id + 1)") }
                 drawBadge(ctx: ctx, text: parts.joined(separator: "  "),
-                          at: CGPoint(x: rect.minX, y: max(rect.minY - 26, 6)), color: base)
+                          at: CGPoint(x: rect.minX, y: max(rect.minY - 26, 6)),
+                          color: base, light: !settings.groupColors)
             }
         }
     }
@@ -291,17 +192,32 @@ struct OverlayCanvas: View {
         ctx.stroke(Path(rect), with: .color(color.opacity(0.35)), lineWidth: 1)
     }
 
-    private func drawBadge(ctx: GraphicsContext, text: String, at point: CGPoint, color: Color) {
+    /// 白色骨架上的标签要用深色底 + 白字，否则白底白字看不见
+    private func drawBadge(ctx: GraphicsContext, text: String, at point: CGPoint,
+                           color: Color, light: Bool) {
+        let bg: Color = light ? Color.black.opacity(0.55) : color
+        let fg: Color = light ? Color.white : Color.black
         let resolved = ctx.resolve(
             Text(text)
                 .font(.system(size: 12, weight: .bold))
-                .foregroundColor(.black)
+                .foregroundColor(fg)
         )
         let size = resolved.measure(in: CGSize(width: 400, height: 200))
         let rect = CGRect(x: point.x, y: point.y,
                           width: size.width + 14, height: size.height + 7)
-        ctx.fill(Path(roundedRect: rect, cornerRadius: 5), with: .color(color))
+        ctx.fill(Path(roundedRect: rect, cornerRadius: 5), with: .color(bg))
         ctx.draw(resolved, at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
+    }
+
+    private func groupColor(_ group: String) -> Color {
+        switch group {
+        case "head":  return Color(red: 0.20, green: 0.80, blue: 1.00)
+        case "torso": return Color(red: 0.00, green: 0.90, blue: 0.55)
+        case "armL":  return Color(red: 1.00, green: 0.80, blue: 0.10)
+        case "armR":  return Color(red: 1.00, green: 0.45, blue: 0.10)
+        case "legL":  return Color(red: 0.65, green: 0.45, blue: 1.00)
+        default:      return Color(red: 1.00, green: 0.35, blue: 0.70)
+        }
     }
 
     /// 由面部关键点推算一个能罩住头部的圆（火柴人头部）。
@@ -339,25 +255,5 @@ struct OverlayCanvas: View {
 
         guard let c = center else { return nil }
         return (c, max(radius, 8))
-    }
-
-    private func groupColor(_ group: String) -> Color {
-        switch group {
-        case "head":  return Color(red: 0.20, green: 0.80, blue: 1.00)
-        case "torso": return Color(red: 0.00, green: 0.90, blue: 0.55)
-        case "armL":  return Color(red: 1.00, green: 0.80, blue: 0.10)
-        case "armR":  return Color(red: 1.00, green: 0.45, blue: 0.10)
-        case "legL":  return Color(red: 0.65, green: 0.45, blue: 1.00)
-        default:      return Color(red: 1.00, green: 0.35, blue: 0.70)
-        }
-    }
-
-    private func jointColor(_ index: Int, _ base: Color) -> Color {
-        if PoseEstimator.faceJointIndices.contains(index) { return groupColor("head") }
-        if [6, 8, 10].contains(index) { return groupColor("armL") }
-        if [7, 9, 11].contains(index) { return groupColor("armR") }
-        if [12, 14, 16].contains(index) { return groupColor("legL") }
-        if [13, 15, 17].contains(index) { return groupColor("legR") }
-        return base
     }
 }
