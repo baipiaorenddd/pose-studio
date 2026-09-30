@@ -112,9 +112,10 @@ final class PoseEstimator: NSObject, ObservableObject {
         (.leftAnkle, 16), (.rightAnkle, 17), (.root, 18),
     ]
 
+    /// 3D 姿态模型**没有面部和颈部关节**（只有 13 个身体关节），
+    /// 所以这里只映射存在的那些；头部的圆圈由叠加层用双肩推算。
     private static let vision3DJoints: [(VNHumanBodyPose3DObservation.JointName, Int)] = [
-        (.nose, 0), (.leftEye, 1), (.rightEye, 2), (.leftEar, 3), (.rightEar, 4),
-        (.neck, 5), (.leftShoulder, 6), (.rightShoulder, 7),
+        (.leftShoulder, 6), (.rightShoulder, 7),
         (.leftElbow, 8), (.rightElbow, 9), (.leftWrist, 10), (.rightWrist, 11),
         (.leftHip, 12), (.rightHip, 13), (.leftKnee, 14), (.rightKnee, 15),
         (.leftAnkle, 16), (.rightAnkle, 17), (.root, 18),
@@ -286,7 +287,11 @@ final class PoseEstimator: NSObject, ObservableObject {
             try device.lockForConfiguration()
             let ranges = device.activeFormat.videoSupportedFrameRateRanges
             // 只有落在支持区间内才去设，否则会抛 ObjC 异常（Swift 抓不住）
-            let supported = ranges.contains { target >= $0.minFrameRate && target <= $0.maxFrameRate }
+            var supported = false
+            for r in ranges where target >= r.minFrameRate && target <= r.maxFrameRate {
+                supported = true
+                break
+            }
             if supported {
                 let dur = CMTime(value: 1, timescale: CMTimeScale(target))
                 device.activeVideoMinFrameDuration = dur
@@ -502,13 +507,15 @@ final class PoseEstimator: NSObject, ObservableObject {
 
         for (jointName, slot) in vision3DJoints {
             guard let p = try? obs.pointInImage(jointName) else { continue }
+            // pointInImage 返回 VNPoint（x/y 是 Double），转成 CGPoint
+            let location = CGPoint(x: p.x, y: p.y)
             slots[slot] = Joint(index: slot, name: jointNames[slot],
-                                position: p, confidence: conf)
+                                position: location, confidence: conf)
             any = true
-            minX = min(minX, Double(p.x))
-            maxX = max(maxX, Double(p.x))
-            minY = min(minY, Double(p.y))
-            maxY = max(maxY, Double(p.y))
+            minX = min(minX, Double(location.x))
+            maxX = max(maxX, Double(location.x))
+            minY = min(minY, Double(location.y))
+            maxY = max(maxY, Double(location.y))
         }
 
         guard any else { return nil }

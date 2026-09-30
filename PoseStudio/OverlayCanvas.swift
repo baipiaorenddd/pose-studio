@@ -253,6 +253,15 @@ struct OverlayCanvas: View {
             radius = 28
         }
 
+        // 3D 姿态模型没有任何面部关节，只能用双肩推算头部位置
+        if center == nil, let ls = pt(6), let rs = pt(7) {
+            let mid = CGPoint(x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2)
+            let shoulderW = hypot(rs.x - ls.x, rs.y - ls.y)
+            // 屏幕坐标 y 向下，头部在肩膀上方的 y 更小
+            center = CGPoint(x: mid.x, y: mid.y - shoulderW * 0.52)
+            radius = shoulderW * 0.42
+        }
+
         guard let c = center else { return nil }
         return (c, max(radius, 8))
     }
