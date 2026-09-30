@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 // MARK: - 叠加层画布
 //
@@ -33,6 +34,18 @@ struct OverlayCanvas: View {
                      with: .color(Color.black.opacity(0.55)))
         }
 
+        // 扫描线：整屏的横线合成一条 Path 一次描边，比逐条 stroke 快得多
+        if settings.scanlines {
+            var lines = Path()
+            var y: CGFloat = 0
+            while y < size.height {
+                lines.move(to: CGPoint(x: 0, y: y))
+                lines.addLine(to: CGPoint(x: size.width, y: y))
+                y += 5
+            }
+            ctx.stroke(lines, with: .color(Color.black.opacity(0.16)), lineWidth: 1)
+        }
+
         guard videoSize.width > 1, videoSize.height > 1, !poses.isEmpty else { return }
 
         // aspect-fill 映射
@@ -63,6 +76,8 @@ struct OverlayCanvas: View {
         let lw = max(1, CGFloat(settings.lineWidth))
         let radius = max(1.5, CGFloat(settings.jointRadius))
         let kconf = Float(settings.jointConfidence)
+        // 特效用的时间基准（每帧刷新一次即可）
+        let now = Date().timeIntervalSince1970
 
         for (index, pose) in poses.enumerated() {
             let base = Self.palette[index % Self.palette.count]
@@ -82,6 +97,13 @@ struct OverlayCanvas: View {
                     path.addLine(to: screen(jb.position))
 
                     let color = settings.groupColors ? groupColor(group) : base
+                    // 发光：先用更宽的低透明度线打出光晕，再画实线
+                    if settings.glowEffect {
+                        ctx.stroke(path, with: .color(color.opacity(0.28)),
+                                   style: StrokeStyle(lineWidth: lw * 3.4, lineCap: .round))
+                        ctx.stroke(path, with: .color(color.opacity(0.45)),
+                                   style: StrokeStyle(lineWidth: lw * 2.0, lineCap: .round))
+                    }
                     ctx.stroke(path, with: .color(color),
                                style: StrokeStyle(lineWidth: lw, lineCap: .round))
                     ctx.stroke(path, with: .color(Color.white.opacity(0.85)),
@@ -112,13 +134,26 @@ struct OverlayCanvas: View {
                     }
                 }
 
-                let circleRect = CGRect(x: head.center.x - hr,
-                                        y: head.center.y - hr,
-                                        width: hr * 2,
-                                        height: hr * 2)
+                // 呼吸脉冲：半径轻微起伏，让圆圈"活"起来
+                var drawR = hr
+                if settings.headPulse {
+                    drawR = hr * (1.0 + 0.055 * CGFloat(sin(now * 3.4)))
+                }
+
+                let circleRect = CGRect(x: head.center.x - drawR,
+                                        y: head.center.y - drawR,
+                                        width: drawR * 2,
+                                        height: drawR * 2)
                 let circlePath = Path(ellipseIn: circleRect)
-                ctx.fill(circlePath, with: .color(headColor.opacity(0.18)))
-                ctx.stroke(circlePath, with: .color(headColor), lineWidth: lw)
+                // 只要线条，不填充 —— 简陋的火柴人风格
+                if settings.glowEffect {
+                    ctx.stroke(circlePath, with: .color(headColor.opacity(0.28)),
+                               style: StrokeStyle(lineWidth: lw * 3.2, lineCap: .round))
+                    ctx.stroke(circlePath, with: .color(headColor.opacity(0.45)),
+                               style: StrokeStyle(lineWidth: lw * 1.9, lineCap: .round))
+                }
+                ctx.stroke(circlePath, with: .color(headColor),
+                           style: StrokeStyle(lineWidth: lw, lineCap: .round))
             }
 
             // ---------- 关节圆点 ----------

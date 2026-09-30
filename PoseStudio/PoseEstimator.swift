@@ -61,6 +61,8 @@ final class PoseEstimator: NSObject, ObservableObject {
     // 由界面同步进来的参数（避免跨线程读 ObservableObject）
     var detectionConfidence: Float = 0.30
     var maxPeople: Int = 1
+    /// 推理帧率上限（1–120），由界面滑杆同步
+    var fpsLimit: Double = 30
 
     let session = AVCaptureSession()
 
@@ -74,6 +76,19 @@ final class PoseEstimator: NSObject, ObservableObject {
 
     private var frameCount = 0
     private var lastFPSAt = CFAbsoluteTimeGetCurrent()
+    private var lastProcessAt: CFAbsoluteTime = 0
+
+    // ---- 方向自动探测 ----
+    //
+    // 之前是"猜"方向（缓冲区横的就用 .right）。一旦猜错，Vision 拿到的就是
+    // 一张倒过来的图，姿态模型几乎检测不到人 —— 表现就是"识别很弱"。
+    // 现在改成：启动后轮流用 4 个方向各跑若干帧，哪个方向能检测到人就锁定哪个。
+    private let orientationList: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
+    private var probeScore = [0, 0, 0, 0]
+    private var probeCursor = 0
+    private var probeFrames = 0
+    private var lockedOrientationIndex: Int? = nil
+    @Published var orientationLabel: String = "探测中…"
 
     private static let visionJoints: [(VNHumanBodyPoseObservation.JointName, Int)] = [
         (.nose, 0), (.leftEye, 1), (.rightEye, 2), (.leftEar, 3), (.rightEar, 4),
@@ -82,6 +97,24 @@ final class PoseEstimator: NSObject, ObservableObject {
         (.leftHip, 12), (.rightHip, 13), (.leftKnee, 14), (.rightKnee, 15),
         (.leftAnkle, 16), (.rightAnkle, 17), (.root, 18),
     ]
+
+    static func orientationName(_ o: CGImagePropertyOrientation) -> String {
+        switch o {
+        case .up: return "0°"
+        case .right: return "90°"
+        case .down: return "180°"
+        default: return "270°"
+        }
+    }
+
+    /// 重新开始方向探测（切前后摄像头、重启会话时调用）
+    func resetOrientationProbe() {
+        lockedOrientationIndex = nil
+        probeScore = [0, 0, 0, 0]
+        probeCursor = 0
+        probeFrames = 0
+        DispatchQueue.main.async { self.orientationLabel = "探测中…" }
+    }
 
     // MARK: 权限 + 启动
 
@@ -105,6 +138,7 @@ final class PoseEstimator: NSObject, ObservableObject {
     }
 
     private func boot() {
+        resetOrientationProbe()
         statusText = "启动中…"
         sessionQueue.async {
             self.configureIfNeeded()
@@ -130,6 +164,7 @@ final class PoseEstimator: NSObject, ObservableObject {
     /// 切换前后摄像头：重建输入
     func switchCamera(front: Bool) {
         useFront = front
+        resetOrientationProbe()
         sessionQueue.async {
             guard self.configured else { return }
             self.session.beginConfiguration()
@@ -198,23 +233,31 @@ final class PoseEstimator: NSObject, ObservableObject {
     // MARK: 每帧推理
 
     fileprivate func handle(pixelBuffer: CVPixelBuffer) {
+        // ---- 帧率上限（1–120）----
+        // 超出的帧直接丢掉，不进入推理。
+        let now0 = CFAbsoluteTimeGetCurrent()
+        if fpsLimit >= 1 {
+            let minInterval = 1.0 / min(max(fpsLimit, 1.0), 120.0)
+            if now0 - lastProcessAt < minInterval { return }
+            lastProcessAt = now0
+        }
+
         let bufferW = CVPixelBufferGetWidth(pixelBuffer)
         let bufferH = CVPixelBufferGetHeight(pixelBuffer)
 
-        // ---- 方向对齐（这是"骨骼横着"那个 bug 的修复点）----
-        //
-        // 画面目标是竖屏正立。AVCaptureConnection.videoRotationAngle 会把缓冲区
-        // 物理旋转，但它在会话真正跑起来之前设置经常不生效——那样 Vision 拿到的
-        // 就是横屏缓冲区，坐标空间和预览画面差了 90°，骨架自然就是横的。
-        //
-        // 这里不再依赖它：直接看缓冲区的真实宽高。
-        //   缓冲区是竖的 -> 连接层旋转已生效 -> Vision 用 .up，尺寸照旧
-        //   缓冲区是横的 -> 没生效 -> 在 Vision 这一层补 90° 旋转，并发布旋转后的尺寸
-        // 两种情况骨架都会和画面一致。
-        let bufferIsPortrait = bufferH >= bufferW
-        let visionOrientation: CGImagePropertyOrientation = bufferIsPortrait ? .up : .right
-        let orientedW = bufferIsPortrait ? bufferW : bufferH
-        let orientedH = bufferIsPortrait ? bufferH : bufferW
+        // ---- 方向：自动探测，不再猜 ----
+        let orientationIndex: Int
+        if let locked = lockedOrientationIndex {
+            orientationIndex = locked
+        } else {
+            orientationIndex = probeCursor
+        }
+        let visionOrientation = orientationList[orientationIndex]
+
+        // 旋转 90°/270° 时，Vision 看到的画面宽高互换
+        let swapped = (visionOrientation == .left || visionOrientation == .right)
+        let orientedW = swapped ? bufferH : bufferW
+        let orientedH = swapped ? bufferW : bufferH
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                             orientation: visionOrientation,
@@ -237,6 +280,30 @@ final class PoseEstimator: NSObject, ObservableObject {
             }
         }
 
+        // ---- 探测阶段：累计每个方向的检测命中数，够了就锁定 ----
+        var lockedNow: Int? = nil
+        if lockedOrientationIndex == nil {
+            probeScore[orientationIndex] += found.count
+            probeFrames += 1
+            probeCursor = (probeCursor + 1) % orientationList.count
+
+            // 每 8 帧（每个方向 2 帧）评估一次
+            if probeFrames >= orientationList.count * 2 {
+                probeFrames = 0
+                var bestIdx = 0
+                var bestVal = 0
+                for (i, v) in probeScore.enumerated() where v > bestVal {
+                    bestVal = v
+                    bestIdx = i
+                }
+                // 只有在确实检测到过人才锁定；全是 0 就继续试探
+                if bestVal > 0 {
+                    lockedOrientationIndex = bestIdx
+                    lockedNow = bestIdx
+                }
+            }
+        }
+
         frameCount += 1
         let now = CFAbsoluteTimeGetCurrent()
         var newFPS: Double = 0
@@ -245,10 +312,17 @@ final class PoseEstimator: NSObject, ObservableObject {
             frameCount = 0
             lastFPSAt = now
         }
+        let lockToPublish = lockedNow
+        let labelToPublish = Self.orientationName(visionOrientation)
 
         DispatchQueue.main.async {
             self.poses = found
             self.inferenceMS = elapsed
+            if let l = lockToPublish {
+                self.orientationLabel = labelToPublish + " 已锁定"
+            } else if self.lockedOrientationIndex == nil {
+                self.orientationLabel = "探测中（" + labelToPublish + "）"
+            }
             let newSize = CGSize(width: orientedW, height: orientedH)
             if self.videoSize != newSize {
                 self.videoSize = newSize

@@ -20,12 +20,12 @@ final class Settings: ObservableObject {
 
     // ---- 显示元素开关（互不影响）----
     @Published var showSkeleton: Bool = true      // 骨架连线
-    @Published var showKeypoints: Bool = true     // 关节圆点
+    @Published var showKeypoints: Bool = false    // 关节圆点（默认关，火柴人风格更干净）
     @Published var showBox: Bool = true           // 边界框
     @Published var showLabel: Bool = true         // 标签 + 置信度
     @Published var showIDs: Bool = true           // 人物编号
     @Published var showNames: Bool = false        // 关节名称
-    @Published var showFacePoints: Bool = true    // 面部关键点（眼/耳）
+    @Published var showFacePoints: Bool = false   // 面部关键点（眼/耳）
     @Published var showHUD: Bool = true           // 帧率 / 人数
 
     // ---- 样式 ----
@@ -33,8 +33,13 @@ final class Settings: ObservableObject {
     @Published var cornerBox: Bool = true         // 四角括号框
     @Published var dimBackground: Bool = false    // 压暗背景突出骨架
     @Published var hideLowConfidence: Bool = true // 隐藏低置信度关节
-    /// 火柴人模式：头部画成一个圆圈，并隐藏眼/耳/鼻等面部关键点
-    @Published var stickHead: Bool = false
+    /// 火柴人模式：头部画成一个圆圈，并隐藏眼/耳/鼻等面部关键点（默认开启）
+    @Published var stickHead: Bool = true
+
+    // ---- 特效 ----
+    @Published var glowEffect: Bool = true        // 骨架发光
+    @Published var scanlines: Bool = false        // 扫描线
+    @Published var headPulse: Bool = true         // 头部圆圈呼吸脉冲
 
     // ---- 参数 ----
     @Published var detectionConfidence: Double = 0.30
@@ -42,6 +47,8 @@ final class Settings: ObservableObject {
     @Published var lineWidth: Double = 3
     @Published var jointRadius: Double = 5
     @Published var maxPeople: Double = 1
+    /// 推理帧率上限（1–120）。调低省电降温，调高更跟手。
+    @Published var fpsLimit: Double = 30
 
     // ---- 摄像头 ----
     @Published var useFrontCamera: Bool = false

@@ -38,16 +38,18 @@ struct ContentView: View {
         .onAppear { syncToEstimator() }
         .onChange(of: settings.detectionConfidence) { _, v in estimator.detectionConfidence = Float(v) }
         .onChange(of: settings.maxPeople) { _, v in estimator.maxPeople = Int(v) }
+        .onChange(of: settings.fpsLimit) { _, v in estimator.fpsLimit = v }
         .onChange(of: settings.useFrontCamera) { _, v in estimator.switchCamera(front: v) }
     }
 
     // MARK: - 顶部状态条
 
     private var hud: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             chip("FPS", String(format: "%.1f", estimator.fps), true)
             chip("人数", "\(estimator.poses.count)", false)
-            chip("耗时", String(format: "%.0f ms", estimator.inferenceMS), false)
+            chip("耗时", String(format: "%.0f", estimator.inferenceMS) + "ms", false)
+            chip("方向", estimator.orientationLabel, false)
             Spacer()
         }
         .padding(.horizontal, 12)
@@ -55,13 +57,13 @@ struct ContentView: View {
     }
 
     private func chip(_ title: String, _ value: String, _ highlight: Bool) -> some View {
-        HStack(spacing: 4) {
-            Text(title).foregroundColor(.white.opacity(0.65))
+        HStack(spacing: 3) {
+            Text(title).foregroundColor(.white.opacity(0.6))
             Text(value).foregroundColor(highlight ? accent : .white).bold()
         }
-        .font(.system(size: 12, design: .monospaced))
-        .padding(.horizontal, 9).padding(.vertical, 5)
-        .background(Color.black.opacity(0.55))
+        .font(.system(size: 10, design: .monospaced))
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .background(.ultraThinMaterial)
         .clipShape(Capsule())
     }
 
@@ -120,8 +122,7 @@ struct ContentView: View {
             }
         }
         .padding(12)
-        .background(Color.black.opacity(0.78))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .padding(.horizontal, 10)
         .padding(.bottom, panelOpen ? 6 : 12)
     }
@@ -208,13 +209,24 @@ struct ContentView: View {
                     toggleRow("显示帧率 / 人数", $settings.showHUD)
                 }
 
+                group("特效") {
+                    toggleRow("骨架发光", $settings.glowEffect)
+                    toggleRow("头部呼吸脉冲", $settings.headPulse)
+                    toggleRow("扫描线", $settings.scanlines)
+                }
+
                 group("参数") {
+                    sliderRow("推理帧率上限", $settings.fpsLimit, 1...120, "%.0f")
                     sliderRow("检测置信度", $settings.detectionConfidence, 0.10...0.90, "%.2f")
                     sliderRow("关节可见度阈值", $settings.jointConfidence, 0.05...0.90, "%.2f")
                     sliderRow("线宽", $settings.lineWidth, 1...10, "%.0f")
                     sliderRow("关节点大小", $settings.jointRadius, 1...12, "%.0f")
                     sliderRow("最多人数", $settings.maxPeople, 1...4, "%.0f")
                 }
+
+                Text("识别方向：\(estimator.orientationLabel)　·　程序会自动试探并锁定正确方向")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.5))
 
                 Text("状态：\(estimator.statusText)　·　Apple Vision 神经引擎，全部本机处理")
                     .font(.system(size: 11))
@@ -224,8 +236,7 @@ struct ContentView: View {
             .padding(16)
         }
         .frame(maxHeight: 330)
-        .background(Color(red: 0.09, green: 0.09, blue: 0.11).opacity(0.97))
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
     }
@@ -269,6 +280,7 @@ struct ContentView: View {
     private func syncToEstimator() {
         estimator.detectionConfidence = Float(settings.detectionConfidence)
         estimator.maxPeople = Int(settings.maxPeople)
+        estimator.fpsLimit = settings.fpsLimit
     }
 }
 
