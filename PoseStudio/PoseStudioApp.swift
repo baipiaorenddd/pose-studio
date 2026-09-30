@@ -36,10 +36,22 @@ final class Settings: ObservableObject {
     /// 火柴人模式：头部画成一个圆圈，并隐藏眼/耳/鼻等面部关键点（默认开启）
     @Published var stickHead: Bool = true
 
-    // ---- 特效 ----
+    // ---- 特效：画面后处理（直接作用在摄像头画面上）----
+    @Published var invertColors: Bool = false     // 反色
+    @Published var grayscale: Bool = false        // 黑白
+    @Published var saturation: Double = 1.0       // 饱和度 0–2
+    @Published var contrast: Double = 1.0         // 对比度 0.5–2
+    @Published var brightness: Double = 0.0       // 亮度 -0.5–0.5
+
+    // ---- 特效：叠加层 ----
     @Published var glowEffect: Bool = true        // 骨架发光
+    @Published var headPulse: Bool = true         // 头部呼吸脉冲
     @Published var scanlines: Bool = false        // 扫描线
-    @Published var headPulse: Bool = true         // 头部圆圈呼吸脉冲
+    @Published var noiseEffect: Bool = false      // 噪点/雪花
+    @Published var vignette: Bool = false         // 暗角
+    @Published var gridOverlay: Bool = false      // HUD 网格
+    /// 头部圆圈是否填充。默认关 = 纯线条、完全透明（火柴人风格）
+    @Published var headFill: Bool = false
 
     // ---- 参数 ----
     @Published var detectionConfidence: Double = 0.30

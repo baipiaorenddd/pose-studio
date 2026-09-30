@@ -15,7 +15,13 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
+            // 画面后处理：这些是真正作用在摄像头图像上的滤镜
             CameraPreview(session: estimator.session)
+                .saturation(settings.saturation)
+                .contrast(settings.contrast)
+                .brightness(settings.brightness)
+                .grayscale(settings.grayscale ? 1.0 : 0.0)
+                .invertIf(settings.invertColors)
                 .ignoresSafeArea()
 
             OverlayCanvas(poses: estimator.poses,
@@ -190,6 +196,23 @@ struct ContentView: View {
                     .padding(.top, 4)
                 }
 
+                group("★ 特效 · 画面后处理") {
+                    toggleRow("反色", $settings.invertColors)
+                    toggleRow("黑白", $settings.grayscale)
+                    sliderRow("饱和度", $settings.saturation, 0...2, "%.2f")
+                    sliderRow("对比度", $settings.contrast, 0.5...2, "%.2f")
+                    sliderRow("亮度", $settings.brightness, -0.5...0.5, "%.2f")
+                }
+
+                group("★ 特效 · 叠加层") {
+                    toggleRow("骨架发光", $settings.glowEffect)
+                    toggleRow("头部呼吸脉冲", $settings.headPulse)
+                    toggleRow("扫描线", $settings.scanlines)
+                    toggleRow("噪点 / 雪花", $settings.noiseEffect)
+                    toggleRow("暗角", $settings.vignette)
+                    toggleRow("HUD 网格", $settings.gridOverlay)
+                }
+
                 group("显示元素（独立开关）") {
                     toggleRow("骨架连线", $settings.showSkeleton)
                     toggleRow("关节圆点", $settings.showKeypoints)
@@ -202,17 +225,12 @@ struct ContentView: View {
 
                 group("样式") {
                     toggleRow("火柴人头部（圆圈）", $settings.stickHead)
+                    toggleRow("头部圆圈填充", $settings.headFill)
                     toggleRow("分区配色", $settings.groupColors)
                     toggleRow("四角括号框", $settings.cornerBox)
                     toggleRow("压暗背景突出骨架", $settings.dimBackground)
                     toggleRow("隐藏低置信度关节", $settings.hideLowConfidence)
                     toggleRow("显示帧率 / 人数", $settings.showHUD)
-                }
-
-                group("特效") {
-                    toggleRow("骨架发光", $settings.glowEffect)
-                    toggleRow("头部呼吸脉冲", $settings.headPulse)
-                    toggleRow("扫描线", $settings.scanlines)
                 }
 
                 group("参数") {
@@ -298,5 +316,15 @@ struct PillButton: ButtonStyle {
             .padding(.vertical, 10)
             .background(background.opacity(configuration.isPressed ? 0.6 : 1))
             .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+// MARK: - 条件反色
+// SwiftUI 内置的 colorInvert() 不接受参数，这里包一层让它可开关。
+
+extension View {
+    @ViewBuilder
+    func invertIf(_ on: Bool) -> some View {
+        if on { self.colorInvert() } else { self }
     }
 }

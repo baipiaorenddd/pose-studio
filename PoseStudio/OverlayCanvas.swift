@@ -29,12 +29,42 @@ struct OverlayCanvas: View {
     // MARK: 绘制
 
     private func draw(ctx: GraphicsContext, size: CGSize) {
+        let now = Date().timeIntervalSince1970
+
         if settings.dimBackground {
             ctx.fill(Path(CGRect(origin: .zero, size: size)),
                      with: .color(Color.black.opacity(0.55)))
         }
 
-        // 扫描线：整屏的横线合成一条 Path 一次描边，比逐条 stroke 快得多
+        // ---- 暗角：四周压暗，中间提亮 ----
+        if settings.vignette {
+            let grad = Gradient(colors: [Color.clear, Color.black.opacity(0.78)])
+            ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                     with: .radialGradient(grad,
+                                           center: CGPoint(x: size.width / 2, y: size.height / 2),
+                                           startRadius: min(size.width, size.height) * 0.32,
+                                           endRadius: max(size.width, size.height) * 0.72))
+        }
+
+        // ---- HUD 网格 ----
+        if settings.gridOverlay {
+            var g = Path()
+            var gx: CGFloat = 0
+            while gx < size.width {
+                g.move(to: CGPoint(x: gx, y: 0))
+                g.addLine(to: CGPoint(x: gx, y: size.height))
+                gx += 64
+            }
+            var gy: CGFloat = 0
+            while gy < size.height {
+                g.move(to: CGPoint(x: 0, y: gy))
+                g.addLine(to: CGPoint(x: size.width, y: gy))
+                gy += 64
+            }
+            ctx.stroke(g, with: .color(Color.white.opacity(0.10)), lineWidth: 1)
+        }
+
+        // ---- 扫描线：整屏横线合成一条 Path 一次描边，比逐条 stroke 快得多 ----
         if settings.scanlines {
             var lines = Path()
             var y: CGFloat = 0
@@ -43,7 +73,28 @@ struct OverlayCanvas: View {
                 lines.addLine(to: CGPoint(x: size.width, y: y))
                 y += 5
             }
-            ctx.stroke(lines, with: .color(Color.black.opacity(0.16)), lineWidth: 1)
+            ctx.stroke(lines, with: .color(Color.black.opacity(0.18)), lineWidth: 1)
+        }
+
+        // ---- 噪点 / 雪花（用轻量 LCG 生成，每帧不同）----
+        if settings.noiseEffect {
+            var seed = UInt64(now * 1000) &+ 0x9E3779B97F4A7C15
+            func rnd() -> CGFloat {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                return CGFloat((seed >> 33) % 100000) / 100000.0
+            }
+            var dots = Path()
+            for _ in 0..<180 {
+                dots.addRect(CGRect(x: rnd() * size.width, y: rnd() * size.height,
+                                    width: 1.7, height: 1.7))
+            }
+            ctx.fill(dots, with: .color(Color.white.opacity(0.20)))
+            var dark = Path()
+            for _ in 0..<120 {
+                dark.addRect(CGRect(x: rnd() * size.width, y: rnd() * size.height,
+                                    width: 1.7, height: 1.7))
+            }
+            ctx.fill(dark, with: .color(Color.black.opacity(0.22)))
         }
 
         guard videoSize.width > 1, videoSize.height > 1, !poses.isEmpty else { return }
@@ -76,8 +127,6 @@ struct OverlayCanvas: View {
         let lw = max(1, CGFloat(settings.lineWidth))
         let radius = max(1.5, CGFloat(settings.jointRadius))
         let kconf = Float(settings.jointConfidence)
-        // 特效用的时间基准（每帧刷新一次即可）
-        let now = Date().timeIntervalSince1970
 
         for (index, pose) in poses.enumerated() {
             let base = Self.palette[index % Self.palette.count]
@@ -145,12 +194,10 @@ struct OverlayCanvas: View {
                                         width: drawR * 2,
                                         height: drawR * 2)
                 let circlePath = Path(ellipseIn: circleRect)
-                // 只要线条，不填充 —— 简陋的火柴人风格
-                if settings.glowEffect {
-                    ctx.stroke(circlePath, with: .color(headColor.opacity(0.28)),
-                               style: StrokeStyle(lineWidth: lw * 3.2, lineCap: .round))
-                    ctx.stroke(circlePath, with: .color(headColor.opacity(0.45)),
-                               style: StrokeStyle(lineWidth: lw * 1.9, lineCap: .round))
+                // 默认「纯线条 + 零填充」= 完全透明的火柴人头。
+                // 这里刻意不再加发光光晕 —— 粗光晕在小圆上会看起来像一层背景。
+                if settings.headFill {
+                    ctx.fill(circlePath, with: .color(headColor.opacity(0.20)))
                 }
                 ctx.stroke(circlePath, with: .color(headColor),
                            style: StrokeStyle(lineWidth: lw, lineCap: .round))
