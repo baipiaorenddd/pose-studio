@@ -15,6 +15,9 @@ on:
         required: true
         default: '640'
 
+permissions:
+  contents: write      # 需要写权限才能创建 Release 并上传附件
+
 jobs:
   export:
     runs-on: macos-latest
@@ -127,7 +130,28 @@ jobs:
           cp export_result.txt out/ 2>/dev/null || true
           ls -la out
 
-      - name: 上传
+      # 模型 115MB+ 超过 GitHub 单文件 100MB 限制，不能提交进仓库。
+      # 改成发到 Release 附件（支持到 2GB），编译工作流构建前再下载。
+      - name: 发布为 Release 附件
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          TAG="models"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Core ML models" \
+              --notes "YOLO pose 的 Core ML 模型。由 export-coreml 工作流自动发布。"
+          for d in out/*.mlpackage; do
+            [ -e "$d" ] || continue
+            base=$(basename "$d")
+            ( cd out && zip -qry "$base.zip" "$base" )
+            gh release upload "$TAG" "out/$base.zip" --clobber
+            echo "uploaded $base.zip"
+          done
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"' || true
+
+      - name: 上传（工作流产物，14 天）
         if: always()
         uses: actions/upload-artifact@v4
         with:

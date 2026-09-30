@@ -50,11 +50,15 @@ jobs:
           url = "https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/assets/zidane.jpg"
           try:
               urllib.request.urlretrieve(url, "test.jpg")
-              img = Image.open("test.jpg").convert("RGB")
-              print("test image:", img.size, "(zidane.jpg, 2 people)")
+              raw = Image.open("test.jpg").convert("RGB")
+              print("original image:", raw.size, "(zidane.jpg, 2 people)")
           except Exception as e:
               print("download failed:", e, "- using solid grey")
-              img = Image.new("RGB", (640, 480), (128, 128, 128))
+              raw = Image.new("RGB", (1280, 720), (128, 128, 128))
+          # 模型硬性要求 640x640 输入，尺寸不对会直接抛
+          # "Image size W x H not in allowed set of image sizes"
+          img = raw.resize((640, 640))
+          print("model input image:", img.size)
 
           pkgs = sorted(glob.glob("models/**/*.mlpackage", recursive=True))
           print("found %d mlpackage" % len(pkgs))
