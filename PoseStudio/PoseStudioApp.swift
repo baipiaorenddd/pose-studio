@@ -48,6 +48,11 @@ final class Settings: ObservableObject {
     /// 使用 3D 姿态模型（iOS 17+）。对背影/遮挡的鲁棒性更好，但稍慢。
     @Published var use3DModel: Bool = false
 
+    // ---- 平滑（消除关键点抖动）----
+    @Published var smoothingEnabled: Bool = true
+    /// 0 = 轻，1 = 重
+    @Published var smoothingStrength: Double = 0.5
+
     // ---- 摄像头 ----
     @Published var useFrontCamera: Bool = false
 

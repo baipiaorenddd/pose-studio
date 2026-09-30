@@ -39,6 +39,14 @@ struct ContentView: View {
         .onChange(of: settings.detectionConfidence) { _, v in estimator.detectionConfidence = Float(v) }
         .onChange(of: settings.maxPeople) { _, v in estimator.maxPeople = Int(v) }
         .onChange(of: settings.use3DModel) { _, v in estimator.use3DModel = v }
+        .onChange(of: settings.smoothingEnabled) { _, v in
+            estimator.smoothingEnabled = v
+            estimator.resetSmoothing()
+        }
+        .onChange(of: settings.smoothingStrength) { _, v in
+            estimator.smoothingStrength = v
+            estimator.resetSmoothing()
+        }
         .onChange(of: settings.fpsLimit) { _, v in
             estimator.fpsLimit = v
             estimator.updateFrameRate(v)     // 真正去改采集设备帧率
@@ -244,6 +252,8 @@ struct ContentView: View {
 
                 group("识别") {
                     toggleRow("3D 姿态模型（更稳，稍慢）", $settings.use3DModel)
+                    toggleRow("关节点平滑（消除抖动）", $settings.smoothingEnabled)
+                    sliderRow("平滑强度", $settings.smoothingStrength, 0...1, "%.2f")
                     sliderRow("推理帧率上限", $settings.fpsLimit, 1...120, "%.0f")
                     sliderRow("检测置信度", $settings.detectionConfidence, 0.10...0.90, "%.2f")
                     sliderRow("关节可见度阈值", $settings.jointConfidence, 0.05...0.90, "%.2f")
@@ -312,6 +322,8 @@ struct ContentView: View {
         estimator.maxPeople = Int(settings.maxPeople)
         estimator.fpsLimit = settings.fpsLimit
         estimator.use3DModel = settings.use3DModel
+        estimator.smoothingEnabled = settings.smoothingEnabled
+        estimator.smoothingStrength = settings.smoothingStrength
     }
 }
 

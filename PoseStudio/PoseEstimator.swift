@@ -30,6 +30,76 @@ struct LensOption: Identifiable, Hashable {
     let deviceType: AVCaptureDevice.DeviceType
 }
 
+// MARK: - 平滑滤波
+
+/// One Euro Filter —— 姿态关键点平滑的标准做法。
+///
+/// 比"滑动平均"好在于它是**自适应**的：
+///   * 手不动时 → 截止频率低 → 强滤波，把抖动压掉
+///   * 快速挥手时 → 截止频率自动升高 → 弱滤波，不产生拖影延迟
+/// 原理：先用低通估出速度，再按速度动态决定平滑强度。
+final class OneEuroFilter {
+    private var xPrev: Double?
+    private var dxPrev: Double = 0
+    private var tPrev: Double?
+
+    private let minCutoff: Double
+    private let beta: Double
+    private let dCutoff: Double
+
+    init(minCutoff: Double = 1.0, beta: Double = 0.02, dCutoff: Double = 1.0) {
+        self.minCutoff = minCutoff
+        self.beta = beta
+        self.dCutoff = dCutoff
+    }
+
+    func reset() {
+        xPrev = nil
+        dxPrev = 0
+        tPrev = nil
+    }
+
+    private func alpha(_ cutoff: Double, _ dt: Double) -> Double {
+        let tau = 1.0 / (2.0 * Double.pi * max(cutoff, 0.0001))
+        return 1.0 / (1.0 + tau / max(dt, 0.0001))
+    }
+
+    func filter(_ x: Double, at time: Double) -> Double {
+        guard let xp = xPrev, let tp = tPrev else {
+            xPrev = x
+            tPrev = time
+            return x
+        }
+        var dt = time - tp
+        if dt <= 0 || dt > 0.5 { dt = 1.0 / 30.0 }
+        tPrev = time
+
+        // 先估速度并低通
+        let dx = (x - xp) / dt
+        let aD = alpha(dCutoff, dt)
+        let dxHat = aD * dx + (1.0 - aD) * dxPrev
+        dxPrev = dxHat
+
+        // 速度越大，截止频率越高（越不平滑，越跟手）
+        let cutoff = minCutoff + beta * abs(dxHat)
+        let a = alpha(cutoff, dt)
+        let xHat = a * x + (1.0 - a) * xp
+        xPrev = xHat
+        return xHat
+    }
+}
+
+/// 一个关节的 x/y 两个滤波器
+final class JointFilter {
+    let fx: OneEuroFilter
+    let fy: OneEuroFilter
+    init(minCutoff: Double, beta: Double) {
+        fx = OneEuroFilter(minCutoff: minCutoff, beta: beta)
+        fy = OneEuroFilter(minCutoff: minCutoff, beta: beta)
+    }
+    func reset() { fx.reset(); fy.reset() }
+}
+
 // MARK: - 姿态推理
 
 final class PoseEstimator: NSObject, ObservableObject {
@@ -96,6 +166,12 @@ final class PoseEstimator: NSObject, ObservableObject {
     private var frameCount = 0
     private var lastFPSAt = CFAbsoluteTimeGetCurrent()
     private var lastProcessAt: CFAbsoluteTime = 0
+
+    // ---- 平滑（One Euro）----
+    var smoothingEnabled: Bool = true
+    /// 0 = 轻，1 = 重
+    var smoothingStrength: Double = 0.5
+    private var jointFilters: [[JointFilter]] = []
 
     // ---- 方向自动探测 ----
     private let orientationList: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
@@ -449,9 +525,11 @@ final class PoseEstimator: NSObject, ObservableObject {
         }
         let lockToPublish = lockedNow
         let labelToPublish = Self.orientationName(visionOrientation)
+        // 抖动就出在这一步之前：原始关键点逐帧跳，过一遍 One Euro 再发布
+        let smoothedPoses = smooth(found, at: now)
 
         DispatchQueue.main.async {
-            self.poses = found
+            self.poses = smoothedPoses
             self.inferenceMS = elapsed
             if let _ = lockToPublish {
                 self.orientationLabel = labelToPublish + " 已锁定"
@@ -462,6 +540,75 @@ final class PoseEstimator: NSObject, ObservableObject {
             if self.videoSize != newSize { self.videoSize = newSize }
             if newFPS > 0 { self.fps = newFPS }
         }
+    }
+
+    // MARK: 平滑
+
+    /// 对每个关节的归一化坐标做 One Euro 滤波，再用平滑后的点重算外接框。
+    /// 滤波器是按「人索引 + 关节槽位」长期持有的，跨帧才有意义。
+    private func smooth(_ input: [Pose], at time: Double) -> [Pose] {
+        guard smoothingEnabled else {
+            if !jointFilters.isEmpty { jointFilters.removeAll() }
+            return input
+        }
+
+        // 强度 -> 参数：强度越大，静止时截止频率越低（滤波越重）
+        let s = min(max(smoothingStrength, 0.0), 1.0)
+        let minCutoff = 3.0 / (1.0 + s * 5.0)      // 3.0(轻) → 0.5(重)
+        let beta = 0.015 + s * 0.02
+
+        // 人数变化时同步滤波器数量
+        if jointFilters.count > input.count {
+            jointFilters.removeSubrange(input.count..<jointFilters.count)
+        }
+        while jointFilters.count < input.count {
+            jointFilters.append((0..<Self.jointNames.count).map { _ in
+                JointFilter(minCutoff: minCutoff, beta: beta)
+            })
+        }
+
+        var out = input
+        for (pi, pose) in input.enumerated() {
+            var smoothed = pose
+            var lost = true
+            var minX = 1.0, minY = 1.0, maxX = 0.0, maxY = 0.0
+            var any = false
+
+            for slot in 0..<pose.points.count {
+                guard let j = pose.points[slot] else { continue }
+                lost = false
+                let f = jointFilters[pi][slot]
+                let nx = f.fx.filter(Double(j.position.x), at: time)
+                let ny = f.fy.filter(Double(j.position.y), at: time)
+                let np = CGPoint(x: nx, y: ny)
+                smoothed.points[slot] = Joint(index: j.index, name: j.name,
+                                              position: np, confidence: j.confidence)
+                if j.confidence >= detectionConfidence {
+                    any = true
+                    minX = min(minX, nx)
+                    maxX = max(maxX, nx)
+                    minY = min(minY, ny)
+                    maxY = max(maxY, ny)
+                }
+            }
+
+            if lost {
+                for f in jointFilters[pi] { f.reset() }
+                continue
+            }
+            if any {
+                smoothed.boundingBox = CGRect(x: minX, y: minY,
+                                              width: max(0, maxX - minX),
+                                              height: max(0, maxY - minY))
+            }
+            out[pi] = smoothed
+        }
+        return out
+    }
+
+    /// 平滑参数变了要清掉历史，否则会拿旧参数的状态继续算
+    func resetSmoothing() {
+        jointFilters.removeAll()
     }
 
     // MARK: 把人拼成 Pose
