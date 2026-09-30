@@ -38,7 +38,10 @@ struct ContentView: View {
         .onAppear { syncToEstimator() }
         .onChange(of: settings.detectionConfidence) { _, v in estimator.detectionConfidence = Float(v) }
         .onChange(of: settings.maxPeople) { _, v in estimator.maxPeople = Int(v) }
-        .onChange(of: settings.use3DModel) { _, v in estimator.use3DModel = v }
+        .onChange(of: settings.modelChoice) { _, v in
+            estimator.modelChoice = v
+            estimator.use3DModel = (v == "vision3D")
+        }
         .onChange(of: settings.smoothingEnabled) { _, v in
             estimator.smoothingEnabled = v
             estimator.resetSmoothing()
@@ -250,8 +253,25 @@ struct ContentView: View {
                     toggleRow("显示帧率 / 人数", $settings.showHUD)
                 }
 
+                group("识别模型") {
+                    Picker("", selection: $settings.modelChoice) {
+                        Text("Vision 2D").tag("vision2D")
+                        Text("Vision 3D").tag("vision3D")
+                        Text("YOLO26x").tag("yolo26x")
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.vertical, 2)
+
+                    Text(settings.modelChoice == "yolo26x"
+                         ? "YOLO26x 精度最高但最慢；模型缺失时会自动退回 Vision"
+                         : (settings.modelChoice == "vision3D"
+                            ? "Vision 3D 抗遮挡更好，但没有面部关节，头部圆圈靠双肩推算"
+                            : "Vision 2D 最快，30fps 量级"))
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.45))
+                }
+
                 group("识别") {
-                    toggleRow("3D 姿态模型（更稳，稍慢）", $settings.use3DModel)
                     toggleRow("关节点平滑（消除抖动）", $settings.smoothingEnabled)
                     sliderRow("平滑强度", $settings.smoothingStrength, 0...1, "%.2f")
                     sliderRow("推理帧率上限", $settings.fpsLimit, 1...120, "%.0f")
@@ -321,7 +341,8 @@ struct ContentView: View {
         estimator.detectionConfidence = Float(settings.detectionConfidence)
         estimator.maxPeople = Int(settings.maxPeople)
         estimator.fpsLimit = settings.fpsLimit
-        estimator.use3DModel = settings.use3DModel
+        estimator.modelChoice = settings.modelChoice
+        estimator.use3DModel = (settings.modelChoice == "vision3D")
         estimator.smoothingEnabled = settings.smoothingEnabled
         estimator.smoothingStrength = settings.smoothingStrength
     }

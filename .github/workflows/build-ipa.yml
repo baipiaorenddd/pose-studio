@@ -25,6 +25,25 @@ jobs:
       - name: 安装 XcodeGen
         run: brew install xcodegen
 
+      # 模型 115MB+ 超过 GitHub 单文件 100MB 限制，所以不进仓库，
+      # 由 export-coreml 工作流发布到 Release 附件，构建前拉下来。
+      # 拉不到也能编译（App 会退回 Apple Vision 识别）。
+      - name: 下载 Core ML 姿态模型
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/models PoseStudio
+          gh release download models -R "${{ github.repository }}" \
+             -p "yolo26x-pose.mlpackage.zip" -D /tmp/models || true
+          for z in /tmp/models/*.zip; do
+            [ -e "$z" ] || continue
+            echo "unzip $z"
+            unzip -q -o "$z" -d PoseStudio/
+          done
+          find PoseStudio -maxdepth 1 -name "*.mlpackage" -print
+          du -sh PoseStudio/*.mlpackage 2>/dev/null || echo "no mlpackage -> Apple Vision only"
+
       - name: 生成 Xcode 工程
         run: xcodegen generate --spec project.yml
 

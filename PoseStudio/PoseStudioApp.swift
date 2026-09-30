@@ -45,8 +45,11 @@ final class Settings: ObservableObject {
     @Published var maxPeople: Double = 1
     /// 推理帧率上限（1–120）。会真正改采集设备帧率，不只是软件丢帧。
     @Published var fpsLimit: Double = 30
-    /// 使用 3D 姿态模型（iOS 17+）。对背影/遮挡的鲁棒性更好，但稍慢。
-    @Published var use3DModel: Bool = false
+    /// 识别模型：
+    ///   "vision2D"  Apple Vision 2D 姿态（默认，最快）
+    ///   "vision3D"  Apple Vision 3D 姿态（抗遮挡更好，稍慢）
+    ///   "yolo26x"   YOLO26x pose 走 Core ML（最强，最慢）
+    @Published var modelChoice: String = "vision2D"
 
     // ---- 平滑（消除关键点抖动）----
     @Published var smoothingEnabled: Bool = true

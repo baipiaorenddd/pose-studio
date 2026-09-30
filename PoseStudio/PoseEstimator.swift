@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import Vision
 import ImageIO
+import CoreML
 import Combine
 import CoreGraphics
 
@@ -150,12 +151,17 @@ final class PoseEstimator: NSObject, ObservableObject {
     var fpsLimit: Double = 30
     var use3DModel: Bool = false
 
+    /// 选用的识别模型："vision2D" / "vision3D" / "yolo26x"
+    var modelChoice: String = "vision2D"
+
     let session = AVCaptureSession()
 
     private let sessionQueue = DispatchQueue(label: "posestudio.session")
     private let videoQueue = DispatchQueue(label: "posestudio.video")
     private let request2D = VNDetectHumanBodyPoseRequest()
     private let request3D = VNDetectHumanBodyPose3DRequest()
+    private var yoloRequest: VNCoreMLRequest?
+    private var yoloLoadedName: String?
     private var videoOutput: AVCaptureVideoDataOutput?
     private var currentInput: AVCaptureDeviceInput?
     private var currentDevice: AVCaptureDevice?
@@ -474,7 +480,18 @@ final class PoseEstimator: NSObject, ObservableObject {
         let t0 = CFAbsoluteTimeGetCurrent()
 
         var found: [Pose] = []
-        if use3DModel {
+        if modelChoice.hasPrefix("yolo"),
+           loadYOLO(named: modelChoice),
+           let yoloReq = yoloRequest {
+            // ---- YOLO (Core ML) 路径 ----
+            do { try handler.perform([yoloReq]) } catch { return }
+            if let results = yoloReq.results as? [VNCoreMLFeatureValueObservation],
+               let arr = results.first?.featureValue.multiArrayValue {
+                found = Self.decodeYOLO(arr,
+                                        minConfidence: max(detectionConfidence, 0.25),
+                                        maxPeople: max(1, maxPeople))
+            }
+        } else if use3DModel {
             do { try handler.perform([request3D]) } catch { return }
             if let observations = request3D.results {
                 for (i, obs) in observations.prefix(max(1, maxPeople)).enumerated() {
@@ -609,6 +626,129 @@ final class PoseEstimator: NSObject, ObservableObject {
     /// 平滑参数变了要清掉历史，否则会拿旧参数的状态继续算
     func resetSmoothing() {
         jointFilters.removeAll()
+    }
+
+    // MARK: - YOLO (Core ML) 推理
+
+    /// 从 App 包里加载 YOLO 的 Core ML 模型。
+    /// 优先找已编译的 .mlmodelc；只有 .mlpackage 时现场编译一次。
+    private func loadYOLO(named name: String) -> Bool {
+        if yoloLoadedName == name, yoloRequest != nil { return true }
+        yoloRequest = nil
+        yoloLoadedName = nil
+
+        var url = Bundle.main.url(forResource: name, withExtension: "mlmodelc")
+        if url == nil, let pkg = Bundle.main.url(forResource: name, withExtension: "mlpackage") {
+            url = try? MLModel.compileModel(at: pkg)
+        }
+        guard let modelURL = url else {
+            DispatchQueue.main.async { self.statusText = "未找到模型 \(name)（回退 Apple Vision）" }
+            return false
+        }
+
+        let cfg = MLModelConfiguration()
+        cfg.computeUnits = .all          // 让系统自己挑 CPU / GPU / 神经引擎
+        guard let ml = try? MLModel(contentsOf: modelURL, configuration: cfg),
+              let vn = try? VNCoreMLModel(for: ml) else {
+            DispatchQueue.main.async { self.statusText = "模型加载失败 \(name)" }
+            return false
+        }
+
+        let req = VNCoreMLRequest(model: vn)
+        // 模型硬性要求 640x640。scaleFill = 拉伸填满，不裁切，
+        // 与我在 macOS 上验证时用的预处理一致。
+        req.imageCropAndScaleOption = .scaleFill
+        yoloRequest = req
+        yoloLoadedName = name
+        DispatchQueue.main.async { self.statusText = "已加载 \(name)" }
+        return true
+    }
+
+    /// 解码 YOLO pose 的 Core ML 输出。
+    ///
+    /// 实测规格（在 macOS runner 上真跑出来的）：
+    ///   输出 [1, 300, 57] float32
+    ///     [0..3]  bbox  x1,y1,x2,y2
+    ///     [4]     置信度
+    ///     [5]     类别（恒为 0）
+    ///     [6..56] 17 个关键点 × (x, y, conf)
+    ///
+    /// **坐标是 640 像素空间、y 轴向下**（不是归一化）。
+    /// Vision 用归一化 + y 轴向上，所以必须 x/640、y 翻转成 1 - y/640。
+    private static func decodeYOLO(_ arr: MLMultiArray,
+                                   minConfidence: Float,
+                                   maxPeople: Int) -> [Pose] {
+        let cols = 57
+        let total = arr.count
+        guard total >= cols, total % cols == 0 else { return [] }
+        let rows = total / cols
+        guard arr.dataType == .float32 else { return [] }
+
+        let ptr = arr.dataPointer.bindMemory(to: Float32.self, capacity: total)
+        let S: Float = 640.0
+
+        // COCO 17 关键点 -> 我这套 19 槽位（多了 neck / root，后面合成）
+        let cocoToMine: [(Int, Int)] = [
+            (0, 0),    // nose
+            (1, 1), (2, 2), (3, 3), (4, 4),
+            (5, 6), (6, 7),          // shoulders
+            (7, 8), (8, 9),          // elbows
+            (9, 10), (10, 11),       // wrists
+            (11, 12), (12, 13),      // hips
+            (13, 14), (14, 15),      // knees
+            (15, 16), (16, 17),      // ankles
+        ]
+
+        var out: [Pose] = []
+        for i in 0..<rows {
+            let base = i * cols
+            let conf = ptr[base + 4]
+            if conf < minConfidence { continue }
+
+            let x1 = ptr[base + 0] / S
+            let y1 = ptr[base + 1] / S
+            let x2 = ptr[base + 2] / S
+            let y2 = ptr[base + 3] / S
+
+            var slots = [Joint?](repeating: nil, count: jointNames.count)
+            for (coco, mine) in cocoToMine {
+                let o = base + 6 + coco * 3
+                let kx = ptr[o + 0] / S
+                let ky = ptr[o + 1] / S
+                let kc = ptr[o + 2]
+                let pos = CGPoint(x: Double(kx), y: Double(1.0 - ky))   // y 翻转
+                slots[mine] = Joint(index: mine, name: jointNames[mine],
+                                    position: pos, confidence: kc)
+            }
+
+            // 合成 neck(5) = 双肩中点
+            if let ls = slots[6], let rs = slots[7] {
+                let mid = CGPoint(x: (ls.position.x + rs.position.x) / 2,
+                                  y: (ls.position.y + rs.position.y) / 2)
+                slots[5] = Joint(index: 5, name: jointNames[5], position: mid,
+                                 confidence: min(ls.confidence, rs.confidence))
+            }
+            // 合成 root(18) = 双髋中点
+            if let lh = slots[12], let rh = slots[13] {
+                let mid = CGPoint(x: (lh.position.x + rh.position.x) / 2,
+                                  y: (lh.position.y + rh.position.y) / 2)
+                slots[18] = Joint(index: 18, name: jointNames[18], position: mid,
+                                  confidence: min(lh.confidence, rh.confidence))
+            }
+
+            // 外接框 -> Vision 归一化坐标（原点左下）
+            let bx1 = Double(min(x1, x2))
+            let bx2 = Double(max(x1, x2))
+            let by1 = Double(1.0 - max(y1, y2))     // 图像下方 = Vision 的 y 小
+            let by2 = Double(1.0 - min(y1, y2))
+            let box = CGRect(x: bx1, y: by1,
+                             width: max(0, bx2 - bx1), height: max(0, by2 - by1))
+
+            out.append(Pose(id: out.count, points: slots,
+                            confidence: conf, boundingBox: box))
+            if out.count >= maxPeople { break }
+        }
+        return out
     }
 
     // MARK: 把人拼成 Pose
