@@ -1,0 +1,98 @@
+name: Verify Core ML pose model
+
+# 在 macOS runner 上真跑一次导出好的 Core ML 模型，打印原始输出。
+# 目的：确认 YOLO 输出的坐标是「归一化 0-1」还是「640 像素空间」。
+# 这个约定搞错的话，骨架会整体偏移，光看代码是猜不出来的。
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '导出任务的 run id（用来取产物）'
+        required: true
+        default: '36655947310'
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 同上：numpy 锁 1.x，否则 coremltools 报标量转换错误
+          pip install "numpy==1.26.4" coremltools pillow
+
+      - name: 取导出产物
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run download ${{ github.event.inputs.run_id }} -n coreml-pose-model -D models || true
+          find models -maxdepth 3 -name "*.mlpackage" -print
+          du -sh models 2>/dev/null || true
+
+      - name: 实跑模型并打印原始输出
+        run: |
+          python - <<'PY'
+          import coremltools as ct
+          import numpy as np, glob, os, urllib.request
+          from PIL import Image
+
+          url = "https://raw.githubusercontent.com/ultralytics/ultralytics/main/ultralytics/assets/zidane.jpg"
+          try:
+              urllib.request.urlretrieve(url, "test.jpg")
+              img = Image.open("test.jpg").convert("RGB")
+              print("test image:", img.size, "(zidane.jpg, 2 people)")
+          except Exception as e:
+              print("download failed:", e, "- using solid grey")
+              img = Image.new("RGB", (640, 480), (128, 128, 128))
+
+          pkgs = sorted(glob.glob("models/**/*.mlpackage", recursive=True))
+          print("found %d mlpackage" % len(pkgs))
+          if not pkgs:
+              raise SystemExit("no model found - check run_id")
+
+          for p in pkgs:
+              print("=" * 74)
+              print("MODEL:", os.path.basename(p))
+              m = ct.models.MLModel(p)
+              pred = m.predict({"image": img})
+
+              for k, v in pred.items():
+                  a = np.asarray(v)
+                  print("OUTPUT '%s' shape=%s dtype=%s" % (k, a.shape, a.dtype))
+
+                  rows = a.reshape(-1, a.shape[-1]) if a.ndim == 3 else a
+                  conf = rows[:, 4]
+                  order = np.argsort(-conf)
+                  print("conf top5 : %s" % np.round(conf[order[:5]], 4))
+                  print("conf >0.3 : %d rows" % int((conf > 0.3).sum()))
+
+                  for i in order[:3]:
+                      if conf[i] < 0.3:
+                          continue
+                      row = rows[i]
+                      print("  --- row %d  conf=%.4f  cls=%.4f" % (i, row[4], row[5]))
+                      print("      bbox  = %s  (min=%.4f max=%.4f)" %
+                            (np.round(row[0:4], 4), row[0:4].min(), row[0:4].max()))
+                      kp = row[6:].reshape(-1, 3)
+                      print("      kpts  = %d 个" % len(kp))
+                      print("      kp x  = min %.4f  max %.4f" % (kp[:, 0].min(), kp[:, 0].max()))
+                      print("      kp y  = min %.4f  max %.4f" % (kp[:, 1].min(), kp[:, 1].max()))
+                      print("      kp conf = min %.4f max %.4f" % (kp[:, 2].min(), kp[:, 2].max()))
+                      print("      前5个关键点: %s" % np.round(kp[:5], 4).tolist())
+              print("=" * 74)
+
+          print("INTERPRETATION HINT:")
+          print("  若 min/max 都落在 0..1  -> 坐标是归一化的")
+          print("  若 max 接近 640         -> 坐标是 640 像素空间，需要 /= 640")
+          PY
