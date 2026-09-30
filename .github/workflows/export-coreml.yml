@@ -32,8 +32,12 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install ultralytics coremltools
-          python -c "import coremltools; print('coremltools', coremltools.__version__)"
+          # numpy 必须锁在 1.x：numpy 2.0 移除了「长度 1 的数组当标量用」的旧行为，
+          # coremltools 里有用到，会报 "only 0-dimensional arrays can be converted
+          # to Python scalars"。1.26.4 同时满足 ultralytics 的 >=1.14.5,<=2.3.5。
+          pip install "numpy==1.26.4" ultralytics coremltools
+          python -c "import numpy, coremltools; print('numpy', numpy.__version__); print('coremltools', coremltools.__version__)"
+          python -c "import onnx; print('onnx', onnx.__version__)" 2>/dev/null || true
 
       - name: 逐个尝试导出
         env:
@@ -51,20 +55,25 @@ jobs:
           for name in models:
               print("=" * 72, flush=True)
               print("TRY:", name, flush=True)
-              try:
-                  m = YOLO(name)
-                  out = m.export(format="coreml", nms=True, imgsz=imgsz)
-                  print("OK ->", out, flush=True)
-                  ok.append(name)
-              except Exception as e:
-                  print("FAIL:", type(e).__name__, e, flush=True)
-                  traceback.print_exc()
+              done = False
+              # 先试标准路径（带 NMS），失败再试不带 NMS 的
+              for nms in (True, False):
+                  try:
+                      m = YOLO(name)
+                      out = m.export(format="coreml", nms=nms, imgsz=imgsz)
+                      print("OK nms=%s -> %s" % (nms, out), flush=True)
+                      ok.append("%s(nms=%s)" % (name, nms))
+                      done = True
+                      break
+                  except Exception as e:
+                      print("FAIL nms=%s: %s %s" % (nms, type(e).__name__, e), flush=True)
+                      traceback.print_exc()
+              if not done:
                   bad.append(name)
 
           print("=" * 72, flush=True)
           print("SUCCEEDED:", ok, flush=True)
           print("FAILED   :", bad, flush=True)
-          # 让后续步骤知道有没有成功产物
           with open("export_result.txt", "w") as f:
               f.write("ok=%s\nbad=%s\n" % (ok, bad))
           PY
