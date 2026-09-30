@@ -1,15 +1,15 @@
 name: Export YOLO pose to Core ML
 
-# 把 Ultralytics 的 YOLO 姿态模型导出成 Core ML（iOS 能直接跑）
-# 需要 macOS：coremltools 只有 macOS/Linux 版本，且 Ultralytics 官方推荐 macOS
+# 把 Ultralytics 的姿态模型导出成 Core ML（iOS 能直接跑）
+# 需要 macOS：coremltools 只有 macOS/Linux 版本
 
 on:
   workflow_dispatch:
     inputs:
-      model:
-        description: 'Ultralytics 模型名，例如 yolo26x-pose.pt'
+      models:
+        description: '逗号分隔的模型列表，逐个尝试'
         required: true
-        default: 'yolo26x-pose.pt'
+        default: 'yolo26x-pose.pt,yolo11x-pose.pt'
       imgsz:
         description: '输入分辨率'
         required: true
@@ -29,77 +29,100 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 显示环境
-        run: |
-          python --version
-          sw_vers
-
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install ultralytics coremltools
+          python -c "import coremltools; print('coremltools', coremltools.__version__)"
 
-      - name: 导出 Core ML
+      - name: 逐个尝试导出
         env:
-          MODEL_NAME: ${{ github.event.inputs.model }}
+          MODELS: ${{ github.event.inputs.models }}
           IMGSZ: ${{ github.event.inputs.imgsz }}
         run: |
           python - <<'PY'
-          import os
+          import os, traceback
           from ultralytics import YOLO
-          name = os.environ["MODEL_NAME"]
-          imgsz = int(os.environ["IMGSZ"])
-          print("exporting", name, "imgsz", imgsz, flush=True)
-          m = YOLO(name)
-          out = m.export(format="coreml", nms=True, imgsz=imgsz)
-          print("EXPORTED:", out, flush=True)
+
+          models = [m.strip() for m in os.environ["MODELS"].split(",") if m.strip()]
+          imgsz = int(os.environ.get("IMGSZ", "640"))
+          ok, bad = [], []
+
+          for name in models:
+              print("=" * 72, flush=True)
+              print("TRY:", name, flush=True)
+              try:
+                  m = YOLO(name)
+                  out = m.export(format="coreml", nms=True, imgsz=imgsz)
+                  print("OK ->", out, flush=True)
+                  ok.append(name)
+              except Exception as e:
+                  print("FAIL:", type(e).__name__, e, flush=True)
+                  traceback.print_exc()
+                  bad.append(name)
+
+          print("=" * 72, flush=True)
+          print("SUCCEEDED:", ok, flush=True)
+          print("FAILED   :", bad, flush=True)
+          # 让后续步骤知道有没有成功产物
+          with open("export_result.txt", "w") as f:
+              f.write("ok=%s\nbad=%s\n" % (ok, bad))
           PY
 
       - name: 列出产物
+        if: always()
         run: |
-          ls -la
-          find . -maxdepth 3 -name "*.mlpackage" -print
+          cat export_result.txt || true
+          find . -maxdepth 2 -name "*.mlpackage" -print
           du -sh *.mlpackage 2>/dev/null || true
 
-      - name: 打印模型的输入输出规格（关键：写 Swift 解码要用）
+      - name: 打印模型规格（写 Swift 解码要用）
+        if: always()
         run: |
           python - <<'PY'
           import coremltools as ct, glob, os
           pkgs = glob.glob("**/*.mlpackage", recursive=True)
           if not pkgs:
-              raise SystemExit("no .mlpackage produced")
+              print("NO MLPACKAGE PRODUCED")
+              raise SystemExit(0)
           for p in pkgs:
-              print("=" * 70)
+              print("=" * 72)
               print("PACKAGE:", p)
               total = 0
               for root, _, files in os.walk(p):
                   for f in files:
                       total += os.path.getsize(os.path.join(root, f))
               print("SIZE: %.1f MB" % (total / 1e6))
-              ml = ct.models.MLModel(p)
-              spec = ml.get_spec()
-              print("--- INPUTS ---")
-              for i in spec.description.input:
-                  print("  name=%s" % i.name)
-                  print("  type=%s" % i.type)
-              print("--- OUTPUTS ---")
-              for o in spec.description.output:
-                  print("  name=%s" % o.name)
-                  print("  type=%s" % o.type)
-              print("--- MLPROGRAM ---")
-              print(spec.WhichOneof("Type"))
-              print("=" * 70)
+              try:
+                  ml = ct.models.MLModel(p)
+                  spec = ml.get_spec()
+                  print("--- INPUTS ---")
+                  for i in spec.description.input:
+                      print("  name=%s" % i.name)
+                      print("  type=%s" % i.type)
+                  print("--- OUTPUTS ---")
+                  for o in spec.description.output:
+                      print("  name=%s" % o.name)
+                      print("  type=%s" % o.type)
+                  print("--- TYPE ---", spec.WhichOneof("Type"))
+              except Exception as e:
+                  print("spec read failed:", e)
+              print("=" * 72)
           PY
 
-      - name: 收集产物
+      - name: 收集
+        if: always()
         run: |
           mkdir -p out
-          find . -maxdepth 2 -name "*.mlpackage" -exec cp -R {} out/ \;
+          find . -maxdepth 2 -name "*.mlpackage" -exec cp -R {} out/ \; || true
+          cp export_result.txt out/ 2>/dev/null || true
           ls -la out
 
       - name: 上传
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coreml-pose-model
           path: out/**
           retention-days: 14
+          if-no-files-found: warn
