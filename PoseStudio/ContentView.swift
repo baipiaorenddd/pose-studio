@@ -248,6 +248,7 @@ struct ContentView: View {
                     toggleRow("头部圆圈填充", $settings.headFill)
                     toggleRow("分区配色（关 = 白色骨架）", $settings.groupColors)
                     toggleRow("四角括号框", $settings.cornerBox)
+                    toggleRow("顶端连线到方框", $settings.topLine)
                     toggleRow("压暗背景突出骨架", $settings.dimBackground)
                     toggleRow("隐藏低置信度关节", $settings.hideLowConfidence)
                     toggleRow("显示帧率 / 人数", $settings.showHUD)
@@ -278,6 +279,12 @@ struct ContentView: View {
                     sliderRow("检测置信度", $settings.detectionConfidence, 0.10...0.90, "%.2f")
                     sliderRow("关节可见度阈值", $settings.jointConfidence, 0.05...0.90, "%.2f")
                     sliderRow("最多人数", $settings.maxPeople, 1...4, "%.0f")
+
+                    Button("重新探测识别方向") {
+                        estimator.resetOrientationProbe()
+                    }
+                    .buttonStyle(PillButton(background: Color(white: 0.28), foreground: .white))
+                    .padding(.top, 4)
                 }
 
                 group("外观") {

@@ -632,17 +632,21 @@ final class PoseEstimator: NSObject, ObservableObject {
 
     /// 从 App 包里加载 YOLO 的 Core ML 模型。
     /// 优先找已编译的 .mlmodelc；只有 .mlpackage 时现场编译一次。
-    private func loadYOLO(named name: String) -> Bool {
-        if yoloLoadedName == name, yoloRequest != nil { return true }
+    private func loadYOLO(named choice: String) -> Bool {
+        if yoloLoadedName == choice, yoloRequest != nil { return true }
         yoloRequest = nil
         yoloLoadedName = nil
 
-        var url = Bundle.main.url(forResource: name, withExtension: "mlmodelc")
-        if url == nil, let pkg = Bundle.main.url(forResource: name, withExtension: "mlpackage") {
+        // 界面上的选项是 "yolo26x"，但 bundle 里的文件名是 "yolo26x-pose"
+        // （Xcode 会把 .mlpackage 编译成 .mlmodelc，名字保留原样）
+        let fileName = choice.hasPrefix("yolo") ? choice + "-pose" : choice
+
+        var url = Bundle.main.url(forResource: fileName, withExtension: "mlmodelc")
+        if url == nil, let pkg = Bundle.main.url(forResource: fileName, withExtension: "mlpackage") {
             url = try? MLModel.compileModel(at: pkg)
         }
         guard let modelURL = url else {
-            DispatchQueue.main.async { self.statusText = "未找到模型 \(name)（回退 Apple Vision）" }
+            DispatchQueue.main.async { self.statusText = "未找到模型 \(fileName)（回退 Apple Vision）" }
             return false
         }
 
@@ -650,7 +654,7 @@ final class PoseEstimator: NSObject, ObservableObject {
         cfg.computeUnits = .all          // 让系统自己挑 CPU / GPU / 神经引擎
         guard let ml = try? MLModel(contentsOf: modelURL, configuration: cfg),
               let vn = try? VNCoreMLModel(for: ml) else {
-            DispatchQueue.main.async { self.statusText = "模型加载失败 \(name)" }
+            DispatchQueue.main.async { self.statusText = "模型加载失败 \(fileName)" }
             return false
         }
 
@@ -659,8 +663,8 @@ final class PoseEstimator: NSObject, ObservableObject {
         // 与我在 macOS 上验证时用的预处理一致。
         req.imageCropAndScaleOption = .scaleFill
         yoloRequest = req
-        yoloLoadedName = name
-        DispatchQueue.main.async { self.statusText = "已加载 \(name)" }
+        yoloLoadedName = choice
+        DispatchQueue.main.async { self.statusText = "已加载 \(fileName)" }
         return true
     }
 

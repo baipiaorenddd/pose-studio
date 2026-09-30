@@ -31,6 +31,8 @@ final class Settings: ObservableObject {
     /// 分区配色。关闭 = 纯白骨架（默认）
     @Published var groupColors: Bool = false
     @Published var cornerBox: Bool = true         // 四角括号框
+    /// 从屏幕顶端垂一根线连到方框上沿（像瞄准提示）
+    @Published var topLine: Bool = true
     @Published var dimBackground: Bool = false    // 压暗背景突出骨架
     @Published var hideLowConfidence: Bool = true // 隐藏低置信度关节
     /// 火柴人模式：头部画成一个圆圈，并隐藏眼/耳/鼻等面部关键点

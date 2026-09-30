@@ -153,6 +153,23 @@ struct OverlayCanvas: View {
                 }
             }
 
+            // ---------- 顶端连线：屏幕顶 -> 方框上沿中点 ----------
+            if settings.topLine && rect.maxY > 0 {
+                let midX = rect.midX
+                var drop = Path()
+                drop.move(to: CGPoint(x: midX, y: 0))
+                drop.addLine(to: CGPoint(x: midX, y: max(rect.minY, 0)))
+                ctx.stroke(drop, with: .color(base),
+                           style: StrokeStyle(lineWidth: max(1, lw - 1), lineCap: .round))
+
+                // 顶端一个小横杠，像个瞄准标记
+                var tick = Path()
+                tick.move(to: CGPoint(x: midX - 14, y: 5))
+                tick.addLine(to: CGPoint(x: midX + 14, y: 5))
+                ctx.stroke(tick, with: .color(base),
+                           style: StrokeStyle(lineWidth: lw, lineCap: .round))
+            }
+
             if settings.showLabel || settings.showIDs {
                 var parts: [String] = []
                 if settings.showLabel { parts.append("人 \(Int(pose.confidence * 100))%") }
