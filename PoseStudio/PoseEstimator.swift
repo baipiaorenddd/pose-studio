@@ -282,7 +282,8 @@ final class PoseEstimator: NSObject, ObservableObject {
     /// 真正的帧率控制：改采集设备本身的帧率。
     /// 之前只做了软件丢帧（只能降不能升），所以往上调完全没反应。
     private func applyFrameRate(_ device: AVCaptureDevice, fps: Double) {
-        let target = Float(min(max(fps, 1), 120))
+        // 注意：AVFrameRateRange 的 min/maxFrameRate 是 Double，不是 Float
+        let target = min(max(fps, 1), 120)
         do {
             try device.lockForConfiguration()
             let ranges = device.activeFormat.videoSupportedFrameRateRanges
@@ -293,7 +294,7 @@ final class PoseEstimator: NSObject, ObservableObject {
                 break
             }
             if supported {
-                let dur = CMTime(value: 1, timescale: CMTimeScale(target))
+                let dur = CMTime(value: 1, timescale: CMTimeScale(target.rounded()))
                 device.activeVideoMinFrameDuration = dur
                 device.activeVideoMaxFrameDuration = dur
             }
